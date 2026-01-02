@@ -6,7 +6,7 @@ from typing import Annotated
 
 import typer
 
-from pdftoc.core import process_pdf
+from pdftoc.core import ExtractionMode, process_pdf
 
 app = typer.Typer(
     name="pdftoc",
@@ -71,8 +71,41 @@ def main(
             help="Verbose output",
         ),
     ] = False,
+    optimize: Annotated[
+        int,
+        typer.Option(
+            "--optimize",
+            "-O",
+            help="OCR optimization level (0-3). Higher = smaller file, slower. 2+ needs jbig2enc.",
+            min=0,
+            max=3,
+        ),
+    ] = 1,
+    mode: Annotated[
+        str,
+        typer.Option(
+            "--mode",
+            "-m",
+            help="TOC extraction mode: 'auto' (try TOC page then headers), 'toc-page', 'section-headers'",
+        ),
+    ] = "auto",
+    no_fix: Annotated[
+        bool,
+        typer.Option(
+            "--no-fix",
+            help="Don't fix incorrect existing bookmarks (keep them as-is)",
+        ),
+    ] = False,
 ) -> None:
     """Process a PDF to add TOC bookmarks based on detected table of contents."""
+    # Convert mode string to enum
+    mode_map = {
+        "auto": ExtractionMode.AUTO,
+        "toc-page": ExtractionMode.TOC_PAGE,
+        "section-headers": ExtractionMode.SECTION_HEADERS,
+    }
+    extraction_mode = mode_map.get(mode, ExtractionMode.AUTO)
+
     process_pdf(
         source=source,
         output=output,
@@ -80,6 +113,9 @@ def main(
         force_ocr=force_ocr,
         language=language,
         verbose=verbose,
+        optimize=optimize,
+        mode=extraction_mode,
+        fix_bookmarks=not no_fix,
     )
 
 

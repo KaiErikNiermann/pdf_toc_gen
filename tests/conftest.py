@@ -1,91 +1,55 @@
 """Test fixtures and configuration for pdftoc tests."""
 
-from dataclasses import dataclass
+import shutil
+import sys
 from pathlib import Path
+
+# Add tests directory to path so pdf_test_cases can be imported
+sys.path.insert(0, str(Path(__file__).parent))
 
 import pytest
 
-# Root directory for test fixtures
-FIXTURES_DIR = Path(__file__).parent / "fixtures"
-INPUT_DIR = FIXTURES_DIR / "input"
-OUTPUT_DIR = FIXTURES_DIR / "output"
-
-# Ensure directories exist
-FIXTURES_DIR.mkdir(exist_ok=True)
-INPUT_DIR.mkdir(exist_ok=True)
-OUTPUT_DIR.mkdir(exist_ok=True)
-
-
-@dataclass
-class ExpectedTocEntry:
-    """Expected TOC entry for test validation."""
-
-    title_contains: str  # Substring that should appear in the title
-    page: int  # Expected PDF page number
-    level: int  # Expected hierarchy level
-
-
-@dataclass
-class PdfTestCase:
-    """Test case definition for a PDF file."""
-
-    name: str
-    pdf_path: Path
-    expected_entries: list[ExpectedTocEntry]
-    min_total_entries: int  # Minimum number of TOC entries expected
-    has_text: bool = True  # Whether PDF already has OCR text
-
-
-# Registry of test PDFs
-TEST_PDFS: dict[str, PdfTestCase] = {}
-
-
-def register_test_pdf(test_case: PdfTestCase) -> None:
-    """Register a test PDF case."""
-    TEST_PDFS[test_case.name] = test_case
-
-
-def get_test_pdf(name: str) -> PdfTestCase | None:
-    """Get a test PDF case by name."""
-    return TEST_PDFS.get(name)
-
-
-# Register the modal logic textbook
-register_test_pdf(
-    PdfTestCase(
-        name="modal_logic_textbook",
-        pdf_path=INPUT_DIR / "advanced_logic_course_book.pdf",
-        min_total_entries=30,
-        has_text=True,
-        expected_entries=[
-            # Parts (level 1)
-            ExpectedTocEntry(title_contains="Part I", page=16, level=1),
-            ExpectedTocEntry(title_contains="Part II", page=80, level=1),
-            ExpectedTocEntry(title_contains="Part III", page=136, level=1),
-            ExpectedTocEntry(title_contains="Part IV", page=264, level=1),
-            # Sample chapters (level 2)
-            ExpectedTocEntry(
-                title_contains="Basic language and semantics", page=20, level=2
-            ),
-            ExpectedTocEntry(
-                title_contains="Validity and decidability", page=46, level=2
-            ),
-            ExpectedTocEntry(
-                title_contains="Computation and complexity", page=70, level=2
-            ),
-            # Back matter
-            ExpectedTocEntry(title_contains="Index", page=388, level=2),
-        ],
-    )
+from pdf_test_cases import (
+    OUTPUT_DIR,
+    PdfTestCase,
+    get_test_pdf,
+    get_test_pdfs_with_text,
 )
+
+
+# ============================================================================
+# Utility Functions
+# ============================================================================
+
+
+def is_tesseract_available() -> bool:
+    """Check if Tesseract OCR is available on the system."""
+    return shutil.which("tesseract") is not None
+
+
+def _pdf_id(test_case: PdfTestCase) -> str:
+    """Generate a test ID from a PdfTestCase."""
+    return test_case.name
+
+
+# ============================================================================
+# Pytest Fixtures
+# ============================================================================
+
+
+@pytest.fixture(params=get_test_pdfs_with_text(), ids=_pdf_id)
+def pdf_with_text(request: pytest.FixtureRequest) -> PdfTestCase:
+    """Parametrized fixture for all PDFs that already have OCR text."""
+    return request.param  # type: ignore
 
 
 @pytest.fixture
 def modal_logic_pdf() -> PdfTestCase:
-    """Fixture for the modal logic textbook PDF."""
+    """Fixture for the modal logic textbook PDF (backward compatibility)."""
     test_case = get_test_pdf("modal_logic_textbook")
     assert test_case is not None
-    assert test_case.pdf_path.exists(), f"Test PDF not found: {test_case.pdf_path}"
+    if not test_case.pdf_path.exists():
+        pytest.skip(f"Test PDF not found: {test_case.pdf_path}")
     return test_case
 
 
@@ -96,18 +60,46 @@ def temp_output_pdf(tmp_path: Path) -> Path:
 
 
 @pytest.fixture
-def persistent_output_pdf(modal_logic_pdf: PdfTestCase) -> Path:
+def persistent_output_pdf(request: pytest.FixtureRequest) -> Path:
     """Fixture providing a persistent output PDF path in fixtures/output/."""
-    output_path = OUTPUT_DIR / f"{modal_logic_pdf.name}_output.pdf"
-    return output_path
+    # Get the test case from the test's parameters if available
+    if hasattr(request, "param") and isinstance(request.param, PdfTestCase):
+        test_case = request.param
+    else:
+        # Fallback to modal_logic for backward compat
+        test_case = get_test_pdf("modal_logic_textbook")
+        assert test_case is not None
+    return OUTPUT_DIR / f"{test_case.name}_output.pdf"
+
+
+# ============================================================================
+# Pytest Hooks
+# ============================================================================
+
+
+def pytest_configure(config: pytest.Config) -> None:
+    """Register custom markers."""
+    config.addinivalue_line(
+        "markers", "requires_ocr: mark test as requiring Tesseract OCR"
+    )
+    config.addinivalue_line(
+        "markers", "requires_pdf(name): mark test as requiring a specific PDF"
+    )
 
 
 def pytest_collection_modifyitems(
     config: pytest.Config, items: list[pytest.Item]
 ) -> None:
-    """Skip tests if required PDF files are missing."""
+    """Skip tests based on available resources."""
+    skip_ocr = pytest.mark.skip(reason="Tesseract OCR not available")
+
     for item in items:
-        # Check if test uses a PDF fixture
+        # Skip OCR tests if Tesseract isn't available
+        if "requires_ocr" in [m.name for m in item.iter_markers()]:
+            if not is_tesseract_available():
+                item.add_marker(skip_ocr)
+
+        # Skip tests for missing PDFs
         for marker in item.iter_markers(name="requires_pdf"):
             pdf_name = marker.args[0] if marker.args else None
             if pdf_name:

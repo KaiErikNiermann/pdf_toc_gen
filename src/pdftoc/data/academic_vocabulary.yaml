@@ -1,0 +1,52 @@
+# Academic section header vocabulary
+# Words that commonly appear in academic paper section titles
+# Used to boost scoring for section header detection
+
+words:
+  - introduction
+  - background
+  - motivation
+  - overview
+  - preliminaries
+  - methodology
+  - methods
+  - approach
+  - implementation
+  - evaluation
+  - experiments
+  - results
+  - analysis
+  - discussion
+  - conclusion
+  - conclusions
+  - summary
+  - references
+  - bibliography
+  - acknowledgments
+  - acknowledgements
+  - appendix
+  - appendices
+  - abstract
+  - related
+  - future
+  - limitations
+  - framework
+  - architecture
+  - design
+  - model
+  - system
+  - algorithm
+  - formalization
+  - semantics
+  - syntax
+  - theory
+  - proofs
+  - correctness
+  - soundness
+  - completeness
+  - examples
+  - case
+  - study
+  - applications
+  - extensions
+  - generalization

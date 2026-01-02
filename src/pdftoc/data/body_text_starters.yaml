@@ -1,0 +1,40 @@
+# Body text starter words
+# Words that commonly begin body paragraphs but not section titles
+# Used to filter out false positives in section header detection
+
+words:
+  - the
+  - a
+  - an
+  - this
+  - that
+  - it
+  - we
+  - our
+  - as
+  - for
+  - in
+  - if
+  - let
+  - since
+  - because
+  - where
+  - when
+  - then
+  - also
+  - here
+  - note
+  - see
+  - given
+  - from
+  - with
+  - by
+  - using
+  - suppose
+  - consider
+  - furthermore
+  - moreover
+  - however
+  - therefore
+  - thus
+  - hence
