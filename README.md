@@ -43,4 +43,3 @@ apt install tesseract-ocr
 # macOS
 brew install tesseract
 ```
-# pdf_toc_gen
