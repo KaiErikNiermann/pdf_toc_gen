@@ -6,6 +6,7 @@ from typing import Annotated
 
 import typer
 
+from pdftoc.arxiv import get_arxiv_source
 from pdftoc.core import ExtractionMode, process_pdf
 
 app = typer.Typer(
@@ -30,17 +31,17 @@ def main(
         ),
     ],
     output: Annotated[
-        Path,
+        Path | None,
         typer.Option(
             "--to",
             "-t",
-            help="Output PDF file",
+            help="Output PDF file (required unless using --get-arxiv-source)",
             file_okay=True,
             dir_okay=False,
             writable=True,
             resolve_path=True,
         ),
-    ],
+    ] = None,
     skip_ocr: Annotated[
         bool,
         typer.Option(
@@ -96,8 +97,37 @@ def main(
             help="Don't fix incorrect existing bookmarks (keep them as-is)",
         ),
     ] = False,
+    get_arxiv_source_flag: Annotated[
+        bool,
+        typer.Option(
+            "--get-arxiv-source",
+            "-gs",
+            help="Download arXiv LaTeX source files instead of processing TOC",
+        ),
+    ] = False,
+    arxiv_output_dir: Annotated[
+        Path | None,
+        typer.Option(
+            "--arxiv-output",
+            "-ao",
+            help="Directory for arXiv source download (defaults to PDF's directory)",
+            file_okay=False,
+            dir_okay=True,
+            resolve_path=True,
+        ),
+    ] = None,
 ) -> None:
     """Process a PDF to add TOC bookmarks based on detected table of contents."""
+    # Handle arXiv source download mode
+    if get_arxiv_source_flag:
+        get_arxiv_source(source, arxiv_output_dir, verbose)
+        return
+
+    # Regular TOC processing requires output path
+    if output is None:
+        print("Error: --to/-t output path is required for TOC processing")
+        raise typer.Exit(1)
+
     # Convert mode string to enum
     mode_map = {
         "auto": ExtractionMode.AUTO,
