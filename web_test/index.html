@@ -1,0 +1,544 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>PDF TOC Generator - Pyodide Test</title>
+    <style>
+        * {
+            box-sizing: border-box;
+        }
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, sans-serif;
+            max-width: 900px;
+            margin: 0 auto;
+            padding: 2rem;
+            background: #1a1a2e;
+            color: #eee;
+            min-height: 100vh;
+        }
+        h1 {
+            color: #00d9ff;
+            margin-bottom: 0.5rem;
+        }
+        .subtitle {
+            color: #888;
+            margin-bottom: 2rem;
+        }
+        .upload-zone {
+            border: 2px dashed #444;
+            border-radius: 12px;
+            padding: 3rem;
+            text-align: center;
+            margin-bottom: 1.5rem;
+            transition: all 0.3s;
+            cursor: pointer;
+        }
+        .upload-zone:hover, .upload-zone.dragover {
+            border-color: #00d9ff;
+            background: rgba(0, 217, 255, 0.05);
+        }
+        .upload-zone input {
+            display: none;
+        }
+        .upload-zone label {
+            cursor: pointer;
+            display: block;
+        }
+        .upload-icon {
+            font-size: 3rem;
+            margin-bottom: 1rem;
+        }
+        button {
+            background: #00d9ff;
+            color: #1a1a2e;
+            border: none;
+            padding: 0.75rem 2rem;
+            font-size: 1rem;
+            border-radius: 8px;
+            cursor: pointer;
+            font-weight: 600;
+            transition: all 0.2s;
+        }
+        button:hover:not(:disabled) {
+            background: #00b8d9;
+            transform: translateY(-1px);
+        }
+        button:disabled {
+            background: #444;
+            color: #888;
+            cursor: not-allowed;
+        }
+        #status {
+            margin-top: 1.5rem;
+            padding: 1rem;
+            border-radius: 8px;
+            background: #252542;
+            min-height: 60px;
+        }
+        .loading {
+            color: #ffd700;
+        }
+        .success {
+            color: #00ff88;
+        }
+        .error {
+            color: #ff6b6b;
+        }
+        #output {
+            margin-top: 1.5rem;
+            background: #0d0d1a;
+            border-radius: 8px;
+            padding: 1rem;
+            font-family: 'Fira Code', 'Consolas', monospace;
+            font-size: 0.85rem;
+            white-space: pre-wrap;
+            max-height: 400px;
+            overflow-y: auto;
+            display: none;
+        }
+        #output.show {
+            display: block;
+        }
+        .file-info {
+            background: #252542;
+            padding: 1rem;
+            border-radius: 8px;
+            margin-bottom: 1rem;
+            display: none;
+        }
+        .file-info.show {
+            display: block;
+        }
+        #downloadBtn {
+            display: none;
+            margin-top: 1rem;
+            background: #00ff88;
+        }
+        #downloadBtn.show {
+            display: inline-block;
+        }
+        .spinner {
+            display: inline-block;
+            width: 20px;
+            height: 20px;
+            border: 2px solid #ffd700;
+            border-top-color: transparent;
+            border-radius: 50%;
+            animation: spin 1s linear infinite;
+            margin-right: 0.5rem;
+            vertical-align: middle;
+        }
+        @keyframes spin {
+            to { transform: rotate(360deg); }
+        }
+        .init-status {
+            text-align: center;
+            padding: 2rem;
+            color: #888;
+        }
+    </style>
+</head>
+<body>
+    <h1>📖 PDF TOC Generator</h1>
+    <p class="subtitle">Add bookmarks to PDFs that have a Table of Contents page (runs entirely in browser via Pyodide + pdf.js + pdf-lib)</p>
+    
+    <div id="initStatus" class="init-status">
+        <div class="spinner"></div>
+        Loading libraries... This may take a moment.
+    </div>
+
+    <div id="mainContent" style="display: none;">
+        <div class="upload-zone" id="dropZone">
+            <label for="fileInput">
+                <div class="upload-icon">📄</div>
+                <p><strong>Click to upload</strong> or drag and drop</p>
+                <p style="color: #666; font-size: 0.9rem;">PDF files only</p>
+            </label>
+            <input type="file" id="fileInput" accept=".pdf,application/pdf">
+        </div>
+
+        <div class="file-info" id="fileInfo">
+            <strong>Selected file:</strong> <span id="fileName"></span>
+            <span style="color: #666; margin-left: 1rem;">(<span id="fileSize"></span>)</span>
+        </div>
+
+        <button id="processBtn" disabled>Process PDF</button>
+        <button id="downloadBtn">⬇️ Download Result</button>
+
+        <div id="status"></div>
+        <div id="output"></div>
+    </div>
+
+    <!-- PDF.js for reading PDFs -->
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/4.0.379/pdf.min.mjs" type="module"></script>
+    <!-- pdf-lib for writing PDFs -->
+    <script src="https://unpkg.com/pdf-lib@1.17.1/dist/pdf-lib.min.js"></script>
+    <!-- Pyodide for running Python -->
+    <script src="https://cdn.jsdelivr.net/pyodide/v0.27.0/full/pyodide.js"></script>
+    <script type="module">
+        // Import pdf.js
+        const pdfjsLib = await import('https://cdnjs.cloudflare.com/ajax/libs/pdf.js/4.0.379/pdf.min.mjs');
+        pdfjsLib.GlobalWorkerOptions.workerSrc = 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/4.0.379/pdf.worker.min.mjs';
+
+        // pdf-lib is loaded globally as PDFLib
+        const { PDFDocument } = PDFLib;
+
+        let pyodide = null;
+        let selectedFile = null;
+        let resultPdfBytes = null;
+
+        const dropZone = document.getElementById('dropZone');
+        const fileInput = document.getElementById('fileInput');
+        const fileInfo = document.getElementById('fileInfo');
+        const fileName = document.getElementById('fileName');
+        const fileSize = document.getElementById('fileSize');
+        const processBtn = document.getElementById('processBtn');
+        const downloadBtn = document.getElementById('downloadBtn');
+        const status = document.getElementById('status');
+        const output = document.getElementById('output');
+        const initStatus = document.getElementById('initStatus');
+        const mainContent = document.getElementById('mainContent');
+
+        // Initialize Pyodide and load the Python code from project files
+        async function initPyodide() {
+            try {
+                initStatus.innerHTML = '<div class="spinner"></div> Loading Pyodide...';
+                pyodide = await loadPyodide();
+
+                initStatus.innerHTML = '<div class="spinner"></div> Loading Python TOC extraction code from project...';
+                
+                // Fetch the actual Python source file from the project
+                const pythonCodeResponse = await fetch('../src/pdftoc/toc_extraction_browser.py');
+                if (!pythonCodeResponse.ok) {
+                    throw new Error('Could not load toc_extraction_browser.py - make sure the server is running from the project root');
+                }
+                const pythonCode = await pythonCodeResponse.text();
+                
+                // Load the Python code into Pyodide
+                await pyodide.runPythonAsync(pythonCode);
+                
+                console.log('Python TOC extraction code loaded successfully');
+
+                initStatus.style.display = 'none';
+                mainContent.style.display = 'block';
+            } catch (err) {
+                initStatus.innerHTML = `<span class="error">Failed to initialize: ${err.message}</span>`;
+                console.error(err);
+            }
+        }
+
+        // Extract text from all pages using pdf.js
+        async function extractTextFromPdf(arrayBuffer) {
+            const pdf = await pdfjsLib.getDocument({ data: arrayBuffer }).promise;
+            const pageTexts = [];
+            
+            for (let i = 1; i <= pdf.numPages; i++) {
+                const page = await pdf.getPage(i);
+                const textContent = await page.getTextContent();
+                const text = textContent.items.map(item => item.str).join('\n');
+                pageTexts.push(text);
+            }
+            
+            return { pageTexts, numPages: pdf.numPages };
+        }
+
+        // Add bookmarks to PDF using pdf-lib
+        async function addBookmarksToPdf(pdfBytes, tocEntries, pageOffset) {
+            const pdfDoc = await PDFDocument.load(pdfBytes);
+            const pages = pdfDoc.getPages();
+            
+            // Build outline/bookmarks
+            // pdf-lib doesn't have direct bookmark API, but we can use the lower-level outline API
+            // We'll create a simple flat outline for now
+            
+            // Actually, pdf-lib has limited bookmark support. Let's use the outline feature.
+            // For proper hierarchical bookmarks, we need to build the outline tree manually.
+            
+            const outline = [];
+            for (const entry of tocEntries) {
+                let pdfPageIdx = entry.page + pageOffset - 1;
+                if (pdfPageIdx < 0) pdfPageIdx = 0;
+                if (pdfPageIdx >= pages.length) pdfPageIdx = pages.length - 1;
+                
+                outline.push({
+                    title: entry.title,
+                    level: entry.level,
+                    pageIndex: pdfPageIdx
+                });
+            }
+            
+            // pdf-lib doesn't have a simple addOutline API, so we need to build it manually
+            // using the PDFDocument's context
+            
+            if (outline.length > 0) {
+                const context = pdfDoc.context;
+                
+                // Create outline items
+                const outlineItems = [];
+                for (const item of outline) {
+                    const page = pages[item.pageIndex];
+                    const pageRef = pdfDoc.getPage(item.pageIndex).ref;
+                    
+                    // Create destination array [page, /XYZ, left, top, zoom]
+                    const destArray = context.obj([
+                        pageRef,
+                        context.obj('/XYZ'),
+                        context.obj(null),
+                        context.obj(null),
+                        context.obj(null)
+                    ]);
+                    
+                    // Create outline item dictionary
+                    const outlineItem = context.obj({
+                        Title: PDFLib.PDFString.of(item.title),
+                        Dest: destArray,
+                    });
+                    
+                    outlineItems.push({
+                        ref: context.register(outlineItem),
+                        dict: outlineItem,
+                        level: item.level
+                    });
+                }
+                
+                // Build the outline tree structure with proper parent/child/sibling links
+                // This is complex, so let's build a flat list first (all items at same level)
+                // and then properly link them
+                
+                if (outlineItems.length > 0) {
+                    // Link items together (Prev/Next)
+                    for (let i = 0; i < outlineItems.length; i++) {
+                        const item = outlineItems[i].dict;
+                        if (i > 0) {
+                            item.set(PDFLib.PDFName.of('Prev'), outlineItems[i - 1].ref);
+                        }
+                        if (i < outlineItems.length - 1) {
+                            item.set(PDFLib.PDFName.of('Next'), outlineItems[i + 1].ref);
+                        }
+                    }
+                    
+                    // Create the outline dictionary (root of outline tree)
+                    const outlineDict = context.obj({
+                        Type: context.obj('/Outlines'),
+                        First: outlineItems[0].ref,
+                        Last: outlineItems[outlineItems.length - 1].ref,
+                        Count: context.obj(outlineItems.length)
+                    });
+                    const outlineRef = context.register(outlineDict);
+                    
+                    // Set parent for all items
+                    for (const item of outlineItems) {
+                        item.dict.set(PDFLib.PDFName.of('Parent'), outlineRef);
+                    }
+                    
+                    // Add outline to document catalog
+                    pdfDoc.catalog.set(PDFLib.PDFName.of('Outlines'), outlineRef);
+                }
+            }
+            
+            return await pdfDoc.save();
+        }
+
+        // File selection handling
+        function handleFile(file) {
+            if (!file || !file.name.toLowerCase().endsWith('.pdf')) {
+                setStatus('Please select a PDF file.', 'error');
+                return;
+            }
+            
+            selectedFile = file;
+            fileName.textContent = file.name;
+            fileSize.textContent = formatFileSize(file.size);
+            fileInfo.classList.add('show');
+            processBtn.disabled = false;
+            downloadBtn.classList.remove('show');
+            output.classList.remove('show');
+            resultPdfBytes = null;
+            setStatus('');
+        }
+
+        function formatFileSize(bytes) {
+            if (bytes < 1024) return bytes + ' B';
+            if (bytes < 1024 * 1024) return (bytes / 1024).toFixed(1) + ' KB';
+            return (bytes / (1024 * 1024)).toFixed(1) + ' MB';
+        }
+
+        function setStatus(message, type = '') {
+            status.innerHTML = message;
+            status.className = type;
+        }
+
+        // Drag and drop
+        dropZone.addEventListener('dragover', (e) => {
+            e.preventDefault();
+            dropZone.classList.add('dragover');
+        });
+
+        dropZone.addEventListener('dragleave', () => {
+            dropZone.classList.remove('dragover');
+        });
+
+        dropZone.addEventListener('drop', (e) => {
+            e.preventDefault();
+            dropZone.classList.remove('dragover');
+            const file = e.dataTransfer.files[0];
+            handleFile(file);
+        });
+
+        fileInput.addEventListener('change', (e) => {
+            handleFile(e.target.files[0]);
+        });
+
+        // Process button
+        processBtn.addEventListener('click', async () => {
+            if (!selectedFile || !pyodide) return;
+
+            processBtn.disabled = true;
+            downloadBtn.classList.remove('show');
+            output.classList.remove('show');
+            setStatus('<div class="spinner"></div> Extracting text from PDF...', 'loading');
+
+            try {
+                // Read file as ArrayBuffer
+                const arrayBuffer = await selectedFile.arrayBuffer();
+                const pdfBytes = new Uint8Array(arrayBuffer);
+
+                // Extract text using pdf.js
+                setStatus('<div class="spinner"></div> Extracting text from PDF pages...', 'loading');
+                const { pageTexts, numPages } = await extractTextFromPdf(arrayBuffer);
+                
+                console.log(`Extracted text from ${numPages} pages`);
+
+                // Pass page texts to Python for TOC extraction
+                setStatus('<div class="spinner"></div> Running Python TOC extraction...', 'loading');
+                
+                // Pass data to Python
+                pyodide.globals.set('page_texts_js', pageTexts);
+                pyodide.globals.set('total_pages', numPages);
+
+                // Run Python TOC extraction
+                const result = await pyodide.runPythonAsync(`
+import io
+import sys
+
+# Capture stdout
+old_stdout = sys.stdout
+sys.stdout = io.StringIO()
+
+try:
+    # Convert JS array to Python list
+    page_texts = list(page_texts_js)
+    
+    # Run TOC extraction using the loaded project code
+    toc_entries = extract_toc_from_pages(page_texts[:15], total_pages, verbose=True)
+    
+    # Normalize levels
+    normalized = normalize_levels(toc_entries)
+    
+    # Find page offset
+    page_offset = find_page_offset(page_texts, toc_entries, verbose=True)
+    
+    stdout_content = sys.stdout.getvalue()
+    
+    # Convert entries to list of dicts for JS
+    entries_data = [
+        {'level': e.level, 'title': e.title, 'page': e.page}
+        for e in normalized
+    ]
+    
+    result = {
+        'success': True,
+        'entries': entries_data,
+        'page_offset': page_offset,
+        'log': stdout_content
+    }
+except Exception as e:
+    import traceback
+    stdout_content = sys.stdout.getvalue()
+    result = {
+        'success': False,
+        'error': str(e),
+        'traceback': traceback.format_exc(),
+        'log': stdout_content
+    }
+finally:
+    sys.stdout = old_stdout
+
+result
+                `);
+
+                const resultObj = result.toJs();
+
+                if (resultObj.get('success')) {
+                    const entries = resultObj.get('entries');
+                    const pageOffset = resultObj.get('page_offset');
+                    const log = resultObj.get('log');
+                    
+                    // Convert to plain JS array
+                    const tocEntries = [];
+                    for (const entry of entries) {
+                        tocEntries.push({
+                            level: entry.get('level'),
+                            title: entry.get('title'),
+                            page: entry.get('page')
+                        });
+                    }
+                    
+                    setStatus('<div class="spinner"></div> Adding bookmarks to PDF...', 'loading');
+                    
+                    // Add bookmarks using pdf-lib
+                    resultPdfBytes = await addBookmarksToPdf(pdfBytes, tocEntries, pageOffset);
+                    
+                    // Format TOC for display
+                    const tocDisplay = tocEntries
+                        .slice(0, 30)
+                        .map(e => '  '.repeat(e.level - 1) + e.title + ' ... ' + e.page)
+                        .join('\n');
+                    const moreText = tocEntries.length > 30 
+                        ? `\n... and ${tocEntries.length - 30} more entries` 
+                        : '';
+                    
+                    setStatus(`✅ Successfully added ${tocEntries.length} bookmarks!`, 'success');
+                    output.textContent = log + '\n\n--- Extracted TOC ---\n' + tocDisplay + moreText;
+                    output.classList.add('show');
+                    downloadBtn.classList.add('show');
+                } else {
+                    const error = resultObj.get('error');
+                    const log = resultObj.get('log') || '';
+                    const tb = resultObj.get('traceback') || '';
+                    setStatus(`❌ Error: ${error}`, 'error');
+                    output.textContent = log + '\n\n' + tb;
+                    output.classList.add('show');
+                }
+
+                result.destroy();
+
+            } catch (err) {
+                setStatus(`❌ Error: ${err.message}`, 'error');
+                console.error(err);
+            } finally {
+                processBtn.disabled = false;
+            }
+        });
+
+        // Download button
+        downloadBtn.addEventListener('click', () => {
+            if (!resultPdfBytes) return;
+
+            const blob = new Blob([resultPdfBytes], { type: 'application/pdf' });
+            const url = URL.createObjectURL(blob);
+            const a = document.createElement('a');
+            a.href = url;
+            a.download = selectedFile.name.replace('.pdf', '_with_toc.pdf');
+            document.body.appendChild(a);
+            a.click();
+            document.body.removeChild(a);
+            URL.revokeObjectURL(url);
+        });
+
+        // Initialize on load
+        initPyodide();
+    </script>
+</body>
+</html>
