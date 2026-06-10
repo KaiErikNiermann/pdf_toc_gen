@@ -31,7 +31,11 @@ def _get_body_text_starters() -> set[str]:
     return _load_word_list("body_text_starters.yaml")
 
 
-def extract_section_headers(doc: fitz.Document, verbose: bool) -> list[TocEntry]:
+def extract_section_headers(
+    doc: fitz.Document,
+    verbose: bool,
+    page_texts: dict[int, str] | None = None,
+) -> list[TocEntry]:
     """
     Extract TOC entries by scanning document for section headers.
 
@@ -41,6 +45,11 @@ def extract_section_headers(doc: fitz.Document, verbose: bool) -> list[TocEntry]
     - Negative pattern filtering (body text starters, references)
 
     This is useful for academic papers and documents without a traditional TOC page.
+
+    Args:
+        doc: PyMuPDF document (used for page count and fallback text).
+        verbose: Whether to print debug info.
+        page_texts: Optional pre-extracted text per page {1-indexed: text}.
     """
     toc_entries: list[TocEntry] = []
     seen: set[tuple[str, int]] = set()
@@ -49,8 +58,11 @@ def extract_section_headers(doc: fitz.Document, verbose: bool) -> list[TocEntry]
         print("Scanning document for section headers...")
 
     for page_idx in range(len(doc)):
-        page: fitz.Page = doc[page_idx]
-        text = page.get_text()
+        if page_texts is not None:
+            text = page_texts.get(page_idx + 1, "")
+        else:
+            page: fitz.Page = doc[page_idx]
+            text = page.get_text()
         lines = [line.strip() for line in text.split("\n")]
 
         i = 0
