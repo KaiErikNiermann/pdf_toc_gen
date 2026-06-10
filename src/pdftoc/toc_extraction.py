@@ -7,7 +7,11 @@ import fitz  # type: ignore
 from pdftoc.models import TocEntry
 
 
-def extract_toc_from_text(doc: fitz.Document, verbose: bool) -> list[TocEntry]:
+def extract_toc_from_text(
+    doc: fitz.Document,
+    verbose: bool,
+    page_texts: dict[int, str] | None = None,
+) -> list[TocEntry]:
     """
     Extract TOC entries by finding the table of contents pages and parsing them.
 
@@ -15,16 +19,25 @@ def extract_toc_from_text(doc: fitz.Document, verbose: bool) -> list[TocEntry]:
     - "Chapter 1 .......... 5" (dotted leader)
     - "1. Introduction ... 10" (dotted leader)
     - Line-by-line format where number and title are on separate lines
+
+    Args:
+        doc: PyMuPDF document (used for page count and fallback text).
+        verbose: Whether to print debug info.
+        page_texts: Optional pre-extracted text per page {1-indexed: text}.
+            When provided, uses this instead of page.get_text().
     """
     toc_entries: list[TocEntry] = []
 
-    # Look for TOC pages in the first ~15 pages
+    # Look for TOC pages in the first ~30 pages (some books have long front matter)
     toc_pages: list[tuple[int, str]] = []
-    pages_to_search = min(15, len(doc))
+    pages_to_search = min(30, len(doc))
 
     for i in range(pages_to_search):
-        page: fitz.Page = doc[i]
-        text = page.get_text()
+        if page_texts is not None:
+            text = page_texts.get(i + 1, "")
+        else:
+            page: fitz.Page = doc[i]
+            text = page.get_text()
 
         # Check if this looks like a TOC page
         toc_indicators = [
@@ -33,6 +46,8 @@ def extract_toc_from_text(doc: fitz.Document, verbose: bool) -> list[TocEntry]:
             "inhaltsverzeichnis",
             "índice",
             "sommaire",
+            "目录",
+            "目次",
         ]
         text_lower = text.lower()
         is_toc_page = any(indicator in text_lower for indicator in toc_indicators)
@@ -43,30 +58,68 @@ def extract_toc_from_text(doc: fitz.Document, verbose: bool) -> list[TocEntry]:
         if number_lines >= 5:
             is_toc_page = True
 
+        # If we already found a TOC page, check if this is a continuation
+        # (has many section-number patterns like "1.1", "2.3.4", "N. Title")
+        if not is_toc_page and toc_pages:
+            section_patterns = len(
+                re.findall(r"(?:^|\s)\d+\.\d+(?:\.\d+)?\s", text)
+            )
+            if section_patterns >= 3:
+                is_toc_page = True
+
         if is_toc_page:
             toc_pages.append((i, text))
+        elif toc_pages:
+            # Stop once we hit a non-TOC page after finding TOC pages
+            break
 
     if not toc_pages:
         if verbose:
             print("No TOC pages detected")
         return []
 
-    # Combine all TOC page text
-    toc_text = "\n".join(text for _, text in toc_pages)
+    # Combine all TOC page text (with page break markers for LLM chunking)
+    toc_text = "\n---PAGE BREAK---\n".join(text for _, text in toc_pages)
 
     if verbose:
         print(
             f"TOC text extracted ({len(toc_text)} chars) from {len(toc_pages)} page(s)"
         )
 
+    # Strategy 0: Try LLM-based extraction (OpenAI by default, Ollama fallback)
+    from pdftoc.llm_toc import LlmBackend, extract_toc_with_llm
+
+    try:
+        toc_entries = extract_toc_with_llm(
+            toc_text, verbose=verbose, backend=LlmBackend.AUTO
+        )
+        if toc_entries:
+            toc_entries.sort(key=lambda e: (e.page, e.level))
+            if verbose:
+                print(f"Found {len(toc_entries)} TOC entries via LLM")
+                for entry in toc_entries[:15]:
+                    print(f"  L{entry.level}: {entry.title} -> p.{entry.page}")
+                if len(toc_entries) > 15:
+                    print(f"  ... and {len(toc_entries) - 15} more")
+            return toc_entries
+        elif verbose:
+            print("LLM extraction found no entries, falling back to regex...")
+    except Exception as e:
+        if verbose:
+            print(f"LLM extraction failed ({e}), falling back to regex...")
+
     # Strategy 1: Try dotted leader patterns first
-    toc_entries = _extract_dotted_leader_format(toc_text, len(doc), verbose)
+    toc_entries = _extract_dotted_leader_format(
+        toc_text.replace("---PAGE BREAK---", ""), len(doc), verbose
+    )
 
     # Strategy 2: If no entries found, try line-by-line format
     if not toc_entries:
         if verbose:
             print("No dotted leader format found, trying line-by-line format...")
-        toc_entries = _extract_line_by_line_format(toc_text, len(doc), verbose)
+        toc_entries = _extract_line_by_line_format(
+            toc_text.replace("---PAGE BREAK---", ""), len(doc), verbose
+        )
 
     # Sort by page number, then by level
     toc_entries.sort(key=lambda e: (e.page, e.level))
@@ -283,7 +336,7 @@ def _try_parse_toc_entry(
                 return (TocEntry(level=2, title=line, page=page_num), idx + 2)
             return (TocEntry(level=2, title=line, page=page_num), idx + 2)
 
-    # Check for subsection pattern: "1.1" or "1.2.3"
+    # Check for subsection pattern: "1.1" or "1.2.3" (number only, title on next line)
     subsec_match = re.match(r"^(\d+(?:\.\d+)+)$", line)
     if subsec_match and idx + 2 < len(lines):
         num = subsec_match.group(1)
@@ -297,12 +350,54 @@ def _try_parse_toc_entry(
                 title = f"{num} {title_line}"
                 return (TocEntry(level=level, title=title, page=page_num), idx + 3)
 
+    # Check for "N.N.N Title" on same line, page on next line (marker OCR format)
+    inline_subsec = re.match(r"^(\d+(?:\.\d+)+)\s+(.+)$", line)
+    if inline_subsec and idx + 1 < len(lines):
+        num = inline_subsec.group(1)
+        title = inline_subsec.group(2).strip()
+        page_line = lines[idx + 1]
+        page_num = _parse_page_number(page_line, total_pages)
+        if page_num is not None and len(title) >= 3:
+            level = num.count(".") + 2
+            return (TocEntry(level=level, title=f"{num} {title}", page=page_num), idx + 2)
+
+    # Check for "N Title" on same line, page on next line (marker OCR format)
+    # e.g., "2 Signal Processing Fundamentals" / "21"
+    inline_sec = re.match(r"^(\d{1,2})\s+([A-Z].{2,})$", line)
+    if inline_sec and idx + 1 < len(lines):
+        num = inline_sec.group(1)
+        title = inline_sec.group(2).strip()
+        page_line = lines[idx + 1]
+        page_num = _parse_page_number(page_line, total_pages)
+        if page_num is not None and int(num) <= 20:
+            return (TocEntry(level=2, title=f"{num}. {title}", page=page_num), idx + 2)
+
     return None
+
+
+def _parse_roman_numeral(s: str) -> int | None:
+    """Parse a roman numeral string to an integer, or return None."""
+    s = s.strip().upper()
+    if not s or not re.match(r"^[IVXLCDM]+$", s):
+        return None
+
+    values = {"I": 1, "V": 5, "X": 10, "L": 50, "C": 100, "D": 500, "M": 1000}
+    total = 0
+    prev = 0
+    for char in reversed(s):
+        val = values.get(char, 0)
+        if val < prev:
+            total -= val
+        else:
+            total += val
+        prev = val
+
+    return total if total > 0 else None
 
 
 def _parse_page_number(s: str, total_pages: int) -> int | None:
     """Parse a page number string, handling both arabic and roman numerals."""
-    s = s.strip().lower()
+    s = s.strip()
 
     # Try arabic numeral
     if re.match(r"^\d+$", s):
@@ -312,31 +407,8 @@ def _parse_page_number(s: str, total_pages: int) -> int | None:
         return None
 
     # Try roman numeral (for preface pages etc.)
-    roman_map = {
-        "i": 1,
-        "ii": 2,
-        "iii": 3,
-        "iv": 4,
-        "v": 5,
-        "vi": 6,
-        "vii": 7,
-        "viii": 8,
-        "ix": 9,
-        "x": 10,
-        "xi": 11,
-        "xii": 12,
-        "xiii": 13,
-        "xiv": 14,
-        "xv": 15,
-        "xvi": 16,
-        "xvii": 17,
-        "xviii": 18,
-        "xix": 19,
-        "xx": 20,
-    }
-    if s in roman_map:
-        # Roman numerals typically map to early pages, return as-is
-        # (these are usually before page 1 in the PDF)
-        return roman_map[s]
+    roman = _parse_roman_numeral(s)
+    if roman is not None and roman <= 50:
+        return roman
 
     return None
