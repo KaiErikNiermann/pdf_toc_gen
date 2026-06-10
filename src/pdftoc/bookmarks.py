@@ -40,13 +40,20 @@ def verify_bookmarks(
             f"Bookmarks lack structure: {len(bookmarks)} entries all pointing to page {bookmarks[0].page}"
         )
 
-    # Check 2: Should have reasonable number of entries for document size
+    # Check 2: Bookmarks with numeric-only titles are useless page labels
+    numeric_titles = sum(1 for b in bookmarks if b.title.strip().isdigit())
+    if numeric_titles > len(bookmarks) * 0.8:
+        issues.append(
+            f"Most bookmarks ({numeric_titles}/{len(bookmarks)}) have numeric-only titles"
+        )
+
+    # Check 3: Should have reasonable number of entries for document size
     if len(bookmarks) < 3 and len(doc) > 10:
         issues.append(
             f"Too few bookmarks ({len(bookmarks)}) for document size ({len(doc)} pages)"
         )
 
-    # Check 3: Verify content on pages for a sample of bookmarks
+    # Check 4: Verify content on pages for a sample of bookmarks
     sample_size = min(5, len(bookmarks))
     # Prefer bookmarks not on page 1 for content verification
     sample = sorted(bookmarks, key=lambda b: (b.page == 1, b.page))[:sample_size]
