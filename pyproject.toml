@@ -6,12 +6,25 @@ authors = [
     {name = "Kai Erik Niermann",email = "kai.niermann@gmail.com"}
 ]
 readme = "README.md"
-requires-python = ">=3.13"
+requires-python = ">=3.12,<4.0"
 dependencies = [
     "pymupdf>=1.24.0",
     "typer>=0.12.0",
     "ocrmypdf>=16.0.0",
     "pyyaml>=6.0.0",
+    "doctr (>=1.9.0,<2.0.0)",
+    "pdfplumber (>=0.11.9,<0.12.0)",
+]
+
+[project.optional-dependencies]
+marker = [
+    "marker-pdf>=1.10.0",
+]
+deepdoc = [
+    "deepdoctection>=1.0.0",
+    "timm",
+    "transformers",
+    "python-doctr",
 ]
 
 [project.scripts]
