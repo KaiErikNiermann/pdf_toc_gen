@@ -1,9 +1,12 @@
 """OCR processing for PDFs."""
 
 import subprocess
+import tempfile
 from pathlib import Path
 
 import fitz  # type: ignore
+
+from pdftoc.models import OcrBackend
 
 
 def pdf_has_text(pdf_path: Path) -> bool:
@@ -57,3 +60,53 @@ def run_ocr(
         # Return code 6 means "file already has text" which is fine
         # Don't add extra message - ocrmypdf already printed the error
         raise RuntimeError("OCR failed (see error above)")
+
+
+def extract_text(
+    pdf_path: Path,
+    backend: OcrBackend = OcrBackend.AUTO,
+    language: str = "eng",
+    verbose: bool = False,
+    optimize: int = 1,
+) -> dict[int, str]:
+    """Extract text from a PDF, returning {1-indexed page_num: text}.
+
+    For marker backend: uses surya OCR directly via GPU, returns extracted text.
+    For ocrmypdf backend: creates a temp searchable PDF, then extracts text with pymupdf.
+    """
+    from pdftoc.marker_ocr import is_marker_available
+
+    use_marker = backend == OcrBackend.MARKER or (
+        backend == OcrBackend.AUTO and is_marker_available()
+    )
+
+    if use_marker:
+        if not is_marker_available():
+            raise RuntimeError(
+                "marker-pdf is not installed. "
+                "Install with: poetry install -E marker"
+            )
+        from pdftoc.marker_ocr import extract_text_with_marker
+
+        return extract_text_with_marker(pdf_path, verbose=verbose)
+
+    # ocrmypdf path: create temp searchable PDF, extract text from it
+    if verbose:
+        print("Using ocrmypdf backend...")
+
+    with tempfile.NamedTemporaryFile(suffix=".pdf", delete=False) as tmp:
+        tmp_path = Path(tmp.name)
+
+    try:
+        run_ocr(pdf_path, tmp_path, language, verbose, optimize)
+        doc: fitz.Document = fitz.open(tmp_path)
+        try:
+            page_texts: dict[int, str] = {}
+            for i in range(len(doc)):
+                page: fitz.Page = doc[i]
+                page_texts[i + 1] = page.get_text()
+            return page_texts
+        finally:
+            doc.close()
+    finally:
+        tmp_path.unlink(missing_ok=True)
