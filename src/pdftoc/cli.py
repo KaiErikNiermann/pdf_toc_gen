@@ -156,7 +156,8 @@ def main(
         str,
         typer.Option(
             "--ocr-backend",
-            help="OCR backend: 'auto' (marker if available, else ocrmypdf), 'marker', 'ocrmypdf'",
+            help="OCR backend: 'auto' (marker if available, else ocrmypdf), "
+            "'marker', 'paddle' (PP-OCRv5, CPU-viable), 'ocrmypdf'",
         ),
     ] = "auto",
     searchable: Annotated[
@@ -195,6 +196,7 @@ def main(
     backend_map = {
         "auto": OcrBackend.AUTO,
         "marker": OcrBackend.MARKER,
+        "paddle": OcrBackend.PADDLE,
         "ocrmypdf": OcrBackend.OCRMYPDF,
     }
     backend = backend_map.get(ocr_backend, OcrBackend.AUTO)

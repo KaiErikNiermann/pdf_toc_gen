@@ -9,6 +9,7 @@ class OcrBackend(StrEnum):
 
     AUTO = "auto"  # marker if available, else ocrmypdf
     MARKER = "marker"  # GPU-accelerated via surya, best quality
+    PADDLE = "paddle"  # PaddleOCR PP-OCRv5 classic pipeline, CPU-viable
     OCRMYPDF = "ocrmypdf"  # legacy tesseract-based
 
 

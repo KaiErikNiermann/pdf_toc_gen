@@ -72,9 +72,22 @@ def extract_text(
     """Extract text from a PDF, returning {1-indexed page_num: text}.
 
     For marker backend: uses surya OCR directly via GPU, returns extracted text.
+    For paddle backend: PaddleOCR PP-OCRv5 classic pipeline (CPU-viable).
     For ocrmypdf backend: creates a temp searchable PDF, then extracts text with pymupdf.
     """
     from pdftoc.marker_ocr import is_marker_available
+
+    if backend == OcrBackend.PADDLE:
+        from pdftoc.paddle_ocr import extract_text_with_paddle, is_paddle_available
+
+        if not is_paddle_available():
+            raise RuntimeError(
+                "PaddleOCR is not installed. "
+                "Install with: poetry install -E paddle"
+            )
+        return extract_text_with_paddle(
+            pdf_path, verbose=verbose, language=language
+        )
 
     use_marker = backend == OcrBackend.MARKER or (
         backend == OcrBackend.AUTO and is_marker_available()

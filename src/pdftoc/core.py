@@ -122,9 +122,12 @@ def process_pdf(
     else:
         print("PDF already has text, skipping OCR")
 
-    # Free OCR models from GPU before TOC extraction (LLM may need GPU)
+    # Free OCR models before TOC extraction (LLM may need the GPU/memory)
     if needs_ocr and ocr_backend != OcrBackend.OCRMYPDF:
-        from pdftoc.marker_ocr import unload_models
+        if ocr_backend == OcrBackend.PADDLE:
+            from pdftoc.paddle_ocr import unload_models
+        else:
+            from pdftoc.marker_ocr import unload_models
 
         unload_models()
 
