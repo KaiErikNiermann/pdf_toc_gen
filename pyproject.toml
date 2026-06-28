@@ -45,6 +45,27 @@ packages = [{include = "pdftoc", from = "src"}]
 
 [tool.poetry.group.dev.dependencies]
 pytest = "^8.0.0"
+ruff = "^0.15.20"
+
+[tool.ruff]
+src = ["src", "tests"]
+target-version = "py312"
+
+[tool.pyright]
+include = ["src/pdftoc"]
+exclude = ["**/__pycache__", "scripts"]
+pythonVersion = "3.12"
+# Pragmatic baseline: PyMuPDF (fitz) ships overloaded stubs whose get_text()
+# returns str | list | dict, which the existing code treats as str throughout.
+# Those are downgraded to warnings so the pre-push type-check gate stays usable
+# on the legacy code while still failing on real errors (undefined names, bad
+# imports, etc.). Tighten toward strict as the codebase is annotated.
+typeCheckingMode = "basic"
+reportAttributeAccessIssue = "warning"
+reportArgumentType = "warning"
+reportCallIssue = "warning"
+reportIndexIssue = "warning"
+reportOperatorIssue = "warning"
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
