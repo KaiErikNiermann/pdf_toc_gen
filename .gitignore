@@ -65,3 +65,6 @@ Thumbs.db
 tests/fixtures/output/*.pdf
 output.pdf
 test_output.pdf
+
+# Marker install log (transient)
+*.log
