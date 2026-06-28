@@ -13,8 +13,10 @@ landscape with **empirical benchmarks run on this repo's actual code paths**.
   meaningfully more accurate, and **CPU-viable at ~23 pages/min once the paddle
   version footgun is fixed** (see below). This is the new `paddle` backend.
 - The **VLM-OCR wave** (DeepSeek-OCR, Baidu Unlimited-OCR, dots.ocr, olmOCR,
-  Surya/marker, …) is a genuine *quality* leap but is **GPU-bound**; on CPU it
-  runs at single-digit pages/min. Promising only with ≥8–12 GB VRAM.
+  Surya/marker, …) is a genuine *quality/structure* leap but is **GPU-bound and
+  compute-heavy per page**. Measured here: marker/Surya on an RTX 5080 ran at
+  ~16 pages/min — **slower than both CPU engines**. Its payoff is structured
+  output (layout, tables, LaTeX math), not throughput.
 - **Baidu Unlimited-OCR specifically: not worth integrating** for this tool — a
   days-old, GPU-only 3B VLM whose headline feature targets GPU long-context
   servers, not chunked local OCR.
@@ -78,16 +80,41 @@ pip install "paddlepaddle==3.1.1" -i https://www.paddlepaddle.org.cn/packages/st
 # then: pdftoc --from book.pdf --to out.pdf --ocr-backend paddle
 ```
 
-## GPU notes (RTX 5080 / Blackwell sm_120)
+## Results — GPU (marker/Surya on RTX 5080)
 
-- **PaddleOCR GPU: blocked here by bandwidth, not capability.** paddle's GPU
-  wheels are hosted only on Baidu's China CDN (`bcebos.com`), which delivered at
-  ~32 KB/s — a ~2.5–3 GB wheel ⇒ ~20 h ETA. No fast PyPI mirror exists. If you
-  have the bandwidth: `pip install paddlepaddle-gpu -i
-  https://www.paddlepaddle.org.cn/packages/stable/cu129/` and run with
-  `device="gpu"`; expect a large speedup that makes the accuracy win "free".
-- **marker/Surya GPU** is the viable GPU path (torch comes from PyTorch's fast
-  CDN, needs a cu128 Blackwell build). [Benchmark pending.]
+Three-way, same 8-page dense-math doc, on a Blackwell RTX 5080 (torch 2.11+cu128):
+
+| backend | pages/min | hardware | similarity | notes |
+|---|---|---|---|---|
+| tesseract (`ocrmypdf`) | ~84 | CPU | 0.65 | plain text |
+| PaddleOCR PP-OCRv5 | ~19–23 | CPU | 0.75 | best plain-text accuracy |
+| **marker/Surya** | **~16** (steady-state) | **GPU** | 0.54* | structured markdown + LaTeX math |
+
+\* marker's low similarity is largely a **metric artifact**: it emits restructured
+markdown and renders math as **LaTeX** (`F:\mathcal{P}(\mathbb{N})\to…`), which is
+arguably *more* correct than the PDF's unicode but diffs poorly against the plain
+text layer. It also extracts *more* content (28k vs 26k chars).
+
+**The headline finding: marker/Surya is the slowest of the three even on a fast
+GPU** (~16 pg/min steady-state; model load is only ~5 s and amortizes). The
+transformer/VLM approach is compute-heavy *per page* regardless of GPU speed —
+the VLM-tax, confirmed. Its value is **structure** (reading order, tables, math),
+not throughput or plain-text accuracy.
+
+**Implication for `pdftoc`:** since this tool only needs text to locate TOC
+headings, marker's structural richness is largely wasted while you pay for it in
+speed + a GPU requirement + a non-OSS (OpenRAIL) license. **PaddleOCR is the
+better default** for the accuracy tier; marker is justified only when you
+actually want its structured/markdown output for something else.
+
+### GPU PaddleOCR — not tested (bandwidth)
+
+paddle's GPU wheels are hosted only on Baidu's China CDN (`bcebos.com`), which
+delivered at ~32 KB/s here — a ~2.5–3 GB wheel ⇒ ~20 h ETA, no fast mirror. If
+you have the bandwidth: `pip install paddlepaddle-gpu -i
+https://www.paddlepaddle.org.cn/packages/stable/cu129/` and run with
+`device="gpu"`. (marker/torch was installable because torch ships from PyTorch's
+fast CDN; a cu128 build is required for Blackwell sm_120.)
 
 ## The modern landscape (survey)
 
