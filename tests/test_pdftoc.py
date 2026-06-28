@@ -213,9 +213,9 @@ class TestModalLogicSpecific:
         try:
             entries = extract_toc_from_text(doc, verbose=False)
             part_entries = [e for e in entries if "Part" in e.title]
-            assert (
-                len(part_entries) >= 4
-            ), f"Expected 4 parts, found {len(part_entries)}"
+            assert len(part_entries) >= 4, (
+                f"Expected 4 parts, found {len(part_entries)}"
+            )
         finally:
             doc.close()
 
@@ -225,9 +225,9 @@ class TestModalLogicSpecific:
         try:
             entries = extract_toc_from_text(doc, verbose=False)
             chapter_entries = [e for e in entries if e.title[0].isdigit()]
-            assert (
-                len(chapter_entries) >= 20
-            ), f"Expected at least 20 chapters, found {len(chapter_entries)}"
+            assert len(chapter_entries) >= 20, (
+                f"Expected at least 20 chapters, found {len(chapter_entries)}"
+            )
         finally:
             doc.close()
 
@@ -314,9 +314,9 @@ class TestBookmarkVerification:
                 try:
                     existing = get_existing_bookmarks(doc)
                     is_valid, issues = verify_bookmarks(doc, existing, verbose=False)
-                    assert (
-                        not is_valid
-                    ), f"[{test_case.name}] Expected bad bookmarks to be detected"
+                    assert not is_valid, (
+                        f"[{test_case.name}] Expected bad bookmarks to be detected"
+                    )
                     assert len(issues) > 0
                 finally:
                     doc.close()

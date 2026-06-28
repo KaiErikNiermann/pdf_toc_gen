@@ -114,7 +114,9 @@ def _page_to_bgr(page: fitz.Page, dpi: int) -> Any:
 
     pix = page.get_pixmap(dpi=dpi)
     # pixmap samples are RGB(A); reshape to (h, w, n) then drop alpha + flip to BGR.
-    arr = np.frombuffer(pix.samples, dtype=np.uint8).reshape(pix.height, pix.width, pix.n)
+    arr = np.frombuffer(pix.samples, dtype=np.uint8).reshape(
+        pix.height, pix.width, pix.n
+    )
     rgb = arr[:, :, :3]
     return rgb[:, :, ::-1].copy()  # RGB -> BGR
 
@@ -169,7 +171,9 @@ def _get_field(result: Any, name: str) -> Any:
     return getattr(result, name, None)
 
 
-def _join_reading_order(lines: list[tuple[float, float, str]], line_tol: float = 10.0) -> str:
+def _join_reading_order(
+    lines: list[tuple[float, float, str]], line_tol: float = 10.0
+) -> str:
     """Sort recognized lines top-to-bottom, left-to-right and join into text.
 
     Lines whose top edges are within ``line_tol`` pixels are treated as the same

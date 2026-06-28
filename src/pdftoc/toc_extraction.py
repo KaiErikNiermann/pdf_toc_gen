@@ -61,9 +61,7 @@ def extract_toc_from_text(
         # If we already found a TOC page, check if this is a continuation
         # (has many section-number patterns like "1.1", "2.3.4", "N. Title")
         if not is_toc_page and toc_pages:
-            section_patterns = len(
-                re.findall(r"(?:^|\s)\d+\.\d+(?:\.\d+)?\s", text)
-            )
+            section_patterns = len(re.findall(r"(?:^|\s)\d+\.\d+(?:\.\d+)?\s", text))
             if section_patterns >= 3:
                 is_toc_page = True
 
@@ -359,7 +357,10 @@ def _try_parse_toc_entry(
         page_num = _parse_page_number(page_line, total_pages)
         if page_num is not None and len(title) >= 3:
             level = num.count(".") + 2
-            return (TocEntry(level=level, title=f"{num} {title}", page=page_num), idx + 2)
+            return (
+                TocEntry(level=level, title=f"{num} {title}", page=page_num),
+                idx + 2,
+            )
 
     # Check for "N Title" on same line, page on next line (marker OCR format)
     # e.g., "2 Signal Processing Fundamentals" / "21"

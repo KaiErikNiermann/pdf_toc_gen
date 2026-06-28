@@ -24,7 +24,7 @@ def is_deepdoctection_available() -> bool:
     global _dd_available
     if _dd_available is None:
         try:
-            import deepdoctection  # noqa: F401
+            import deepdoctection  # type: ignore # noqa: F401
 
             _dd_available = True
         except ImportError:
@@ -71,7 +71,7 @@ def _get_analyzer() -> object:
     """Get or create the deepdoctection analyzer (lazy-loaded singleton)."""
     global _analyzer
     if _analyzer is None:
-        import deepdoctection as dd
+        import deepdoctection as dd  # type: ignore
         import torch
 
         device = "cuda" if torch.cuda.is_available() else "cpu"
@@ -220,7 +220,9 @@ def extract_headers_deepdoctection(
             # page_number is 0-indexed in deepdoctection, convert to 1-indexed
             # and add offset if we're using a truncated PDF
             _page_num = page.page_number if hasattr(page, "page_number") else 0
-            page_num: int = int(_page_num) + 1 + page_offset  # Convert to 1-indexed + offset
+            page_num: int = (
+                int(_page_num) + 1 + page_offset
+            )  # Convert to 1-indexed + offset
 
             # Get all layout segments
             layouts = getattr(page, "layouts", [])
@@ -254,11 +256,15 @@ def extract_headers_deepdoctection(
                 text = _clean_title(text)
 
                 if verbose:
-                    print(f"    Candidate [{category}]: '{text[:60]}...' " if len(text) > 60 else f"    Candidate [{category}]: '{text}'")
+                    print(
+                        f"    Candidate [{category}]: '{text[:60]}...' "
+                        if len(text) > 60
+                        else f"    Candidate [{category}]: '{text}'"
+                    )
 
                 if not _is_valid_section_title(text):
                     if verbose:
-                        print(f"      -> Rejected by validation")
+                        print("      -> Rejected by validation")
                     continue
 
                 # Infer section level
@@ -279,6 +285,7 @@ def extract_headers_deepdoctection(
     except Exception as e:
         if verbose:
             import traceback
+
             traceback.print_exc()
             print(f"deepdoctection extraction failed: {e}")
         return []

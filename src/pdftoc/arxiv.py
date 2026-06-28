@@ -2,7 +2,6 @@
 
 import re
 import tarfile
-import tempfile
 import zipfile
 from io import BytesIO
 from pathlib import Path

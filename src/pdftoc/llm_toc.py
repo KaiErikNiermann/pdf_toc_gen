@@ -154,16 +154,11 @@ def extract_toc_batch(
             )
 
     if verbose:
-        print(
-            f"  Batch: {len(jsonl_lines)} requests "
-            f"for {len(toc_texts)} PDFs"
-        )
+        print(f"  Batch: {len(jsonl_lines)} requests for {len(toc_texts)} PDFs")
 
     # Upload JSONL
     jsonl_content = "\n".join(jsonl_lines)
-    with tempfile.NamedTemporaryFile(
-        mode="w", suffix=".jsonl", delete=False
-    ) as tmp:
+    with tempfile.NamedTemporaryFile(mode="w", suffix=".jsonl", delete=False) as tmp:
         tmp.write(jsonl_content)
         tmp_path = tmp.name
 
@@ -186,7 +181,9 @@ def extract_toc_batch(
             time.sleep(5)
             batch = client.batches.retrieve(batch.id)
             if verbose:
-                completed = batch.request_counts.completed if batch.request_counts else 0
+                completed = (
+                    batch.request_counts.completed if batch.request_counts else 0
+                )
                 total = batch.request_counts.total if batch.request_counts else 0
                 print(f"  Batch status: {batch.status} ({completed}/{total})")
 
@@ -209,18 +206,11 @@ def extract_toc_batch(
         req_id = result["custom_id"]
         pdf_id, _ = request_map[req_id]
         body = result.get("response", {}).get("body", {})
-        content = (
-            body.get("choices", [{}])[0]
-            .get("message", {})
-            .get("content", "")
-        )
+        content = body.get("choices", [{}])[0].get("message", {}).get("content", "")
         entries = _parse_json_array(content)
         pdf_raw[pdf_id].extend(entries)
 
-    return {
-        pid: _deduplicate(raw, verbose=False)
-        for pid, raw in pdf_raw.items()
-    }
+    return {pid: _deduplicate(raw, verbose=False) for pid, raw in pdf_raw.items()}
 
 
 # ---------------------------------------------------------------------------
@@ -272,16 +262,16 @@ def _extract_openai(
         return _parse_json_array(content)
 
     with ThreadPoolExecutor(max_workers=min(len(chunks), 8)) as pool:
-        futures = {
-            pool.submit(process_chunk, i, c): i for i, c in enumerate(chunks)
-        }
+        futures = {pool.submit(process_chunk, i, c): i for i, c in enumerate(chunks)}
         for future in as_completed(futures):
             chunk_idx = futures[future]
             try:
                 entries = future.result()
                 all_entries.extend(entries)
                 if verbose:
-                    print(f"    chunk {chunk_idx + 1}/{len(chunks)}: {len(entries)} entries")
+                    print(
+                        f"    chunk {chunk_idx + 1}/{len(chunks)}: {len(entries)} entries"
+                    )
             except Exception as e:
                 if verbose:
                     print(f"    chunk {chunk_idx + 1}/{len(chunks)}: error - {e}")
@@ -328,9 +318,7 @@ def _extract_ollama(
     return all_entries
 
 
-def _deduplicate(
-    raw_entries: list[dict[str, Any]], verbose: bool
-) -> list[TocEntry]:
+def _deduplicate(raw_entries: list[dict[str, Any]], verbose: bool) -> list[TocEntry]:
     """Deduplicate and convert raw dicts to TocEntry list."""
     seen: set[tuple[str, int | None]] = set()
     result: list[TocEntry] = []

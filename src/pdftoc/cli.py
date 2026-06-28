@@ -184,7 +184,9 @@ def main(
 
     # Handle dump-toc mode
     if dump_toc:
-        _dump_toc_plaintext(source, extraction_mode, verbose, toc_width, start_page, end_page)
+        _dump_toc_plaintext(
+            source, extraction_mode, verbose, toc_width, start_page, end_page
+        )
         return
 
     # Regular TOC processing requires output path
@@ -244,7 +246,9 @@ def _dump_toc_plaintext(
                 )
                 if not toc_entries:
                     # Fall back to legacy
-                    toc_entries = extract_section_headers_with_deepdoc(doc, source, verbose)
+                    toc_entries = extract_section_headers_with_deepdoc(
+                        doc, source, verbose
+                    )
         elif mode == ExtractionMode.TOC_PAGE:
             toc_entries = extract_toc_from_text(doc, verbose)
         elif mode == ExtractionMode.SECTION_HEADERS:

@@ -82,12 +82,9 @@ def extract_text(
 
         if not is_paddle_available():
             raise RuntimeError(
-                "PaddleOCR is not installed. "
-                "Install with: poetry install -E paddle"
+                "PaddleOCR is not installed. Install with: poetry install -E paddle"
             )
-        return extract_text_with_paddle(
-            pdf_path, verbose=verbose, language=language
-        )
+        return extract_text_with_paddle(pdf_path, verbose=verbose, language=language)
 
     use_marker = backend == OcrBackend.MARKER or (
         backend == OcrBackend.AUTO and is_marker_available()
@@ -96,8 +93,7 @@ def extract_text(
     if use_marker:
         if not is_marker_available():
             raise RuntimeError(
-                "marker-pdf is not installed. "
-                "Install with: poetry install -E marker"
+                "marker-pdf is not installed. Install with: poetry install -E marker"
             )
         from pdftoc.marker_ocr import extract_text_with_marker
 
