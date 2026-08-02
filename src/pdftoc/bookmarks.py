@@ -7,8 +7,10 @@ import fitz  # type: ignore
 
 from pdftoc.models import TocEntry
 from pdftoc.page_labels import (
+    Folio,
     PageMap,
     PageMapSource,
+    PageRef,
     folios_from_text,
     resolve_page_map,
 )
@@ -20,12 +22,16 @@ _MARGIN_FRACTION = 0.12
 
 def get_existing_bookmarks(doc: fitz.Document) -> list[TocEntry]:
     """Get existing bookmarks from a PDF as TocEntry list."""
-    toc = doc.get_toc()
-    entries = []
-    for item in toc:
-        level, title, page = item[:3]
-        entries.append(TocEntry(level=int(level), title=str(title), page=int(page)))
-    return entries
+    # Bookmarks in a PDF already point at PDF pages, never printed ones.
+    return [
+        TocEntry(
+            level=int(item[0]),
+            title=str(item[1]),
+            page=int(item[2]),
+            page_ref=PageRef.PDF,
+        )
+        for item in doc.get_toc()
+    ]
 
 
 def verify_bookmarks(
@@ -119,9 +125,15 @@ def add_bookmarks(
         # and levels must not skip (e.g., can't go from 1 to 3)
         normalized_entries = _normalize_levels(toc_entries)
 
-        # Build TOC in PyMuPDF format: [level, title, page]
+        # Build TOC in PyMuPDF format: [level, title, page]. Each entry is
+        # mapped through its own frame: roman front matter, arabic body, and
+        # entries already expressed as PDF pages all resolve differently.
         toc: list[list[int | str]] = [
-            [entry.level, entry.title, page_map.to_pdf_page(entry.page, len(doc))]
+            [
+                entry.level,
+                entry.title,
+                page_map.to_pdf_page(entry.page, len(doc), entry.page_ref),
+            ]
             for entry in normalized_entries
         ]
 
@@ -150,7 +162,12 @@ def _normalize_levels(toc_entries: list[TocEntry]) -> list[TocEntry]:
 
     # Shift all levels so minimum is 1
     shifted = [
-        TocEntry(level=e.level - min_level + 1, title=e.title, page=e.page)
+        TocEntry(
+            level=e.level - min_level + 1,
+            title=e.title,
+            page=e.page,
+            page_ref=e.page_ref,
+        )
         for e in toc_entries
     ]
 
@@ -161,13 +178,20 @@ def _normalize_levels(toc_entries: list[TocEntry]) -> list[TocEntry]:
         new_level = entry.level
         if new_level > prev_level + 1:
             new_level = prev_level + 1
-        result.append(TocEntry(level=new_level, title=entry.title, page=entry.page))
+        result.append(
+            TocEntry(
+                level=new_level,
+                title=entry.title,
+                page=entry.page,
+                page_ref=entry.page_ref,
+            )
+        )
         prev_level = new_level
 
     return result
 
 
-def _margin_folios(page: fitz.Page) -> tuple[int, ...]:
+def _margin_folios(page: fitz.Page) -> tuple[Folio, ...]:
     """Folio candidates from text blocks physically in a page's margins.
 
     More reliable than reading the first/last line of the extracted text: it
@@ -180,12 +204,12 @@ def _margin_folios(page: fitz.Page) -> tuple[int, ...]:
     top_band = height * _MARGIN_FRACTION
     bottom_band = height * (1 - _MARGIN_FRACTION)
 
-    folios: set[int] = set()
+    folios: set[Folio] = set()
     for block in page.get_text("blocks"):
         _x0, y0, _x1, y1, text = block[:5]
         if y1 <= top_band or y0 >= bottom_band:
             folios.update(folios_from_text(str(text)))
-    return tuple(sorted(folios))
+    return tuple(sorted(folios, key=lambda f: (f.ref, f.number)))
 
 
 def _page_label_offset(doc: fitz.Document) -> tuple[int, str] | None:
@@ -246,11 +270,18 @@ def find_page_map(
     if not toc_entries:
         return PageMap(0, 0.0, PageMapSource.DEFAULT, "no TOC entries")
 
-    folios_by_page = {i + 1: _margin_folios(doc[i]) for i in range(len(doc))}
+    # Entries already in PDF coordinates say nothing about the offset, and
+    # roman front matter is numbered on a different scale. Only printed arabic
+    # pages can locate the body.
+    probes = [
+        (e.title, e.page)
+        for e in toc_entries
+        if e.page_ref == PageRef.PRINTED_ARABIC and e.page >= 1
+    ]
 
     page_map = resolve_page_map(
-        folios_by_page=folios_by_page,
-        titled_pages=[(e.title, e.page) for e in toc_entries],
+        folios_by_page={i + 1: _margin_folios(doc[i]) for i in range(len(doc))},
+        titled_pages=probes,
         page_text=lambda pdf_page: str(doc[pdf_page - 1].get_text()),
         total_pages=len(doc),
         label_offset=_page_label_offset(doc),

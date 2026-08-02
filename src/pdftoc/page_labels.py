@@ -29,13 +29,37 @@ from dataclasses import dataclass
 from enum import StrEnum
 
 __all__ = [
+    "Folio",
+    "FolioVote",
     "PageMap",
     "PageMapSource",
+    "PageRef",
     "folios_from_text",
+    "format_page_label",
     "offset_from_folios",
     "offset_from_keywords",
+    "parse_page_label",
     "resolve_page_map",
+    "roman_to_int",
 ]
+
+
+class PageRef(StrEnum):
+    """The frame of reference a page number is expressed in.
+
+    A bare integer is ambiguous: printed page 9 of the body, printed page "ix"
+    of the front matter, and PDF page 9 are three different pages. Every page
+    number must therefore carry the frame it belongs to, or it cannot be mapped
+    onto a PDF page correctly.
+    """
+
+    PRINTED_ARABIC = "printed-arabic"  # "42" in the body's own numbering
+    PRINTED_ROMAN = "printed-roman"  # "ix" in the front matter's numbering
+    PDF = "pdf"  # already a 1-indexed PDF page; needs no mapping
+
+
+#: Frames that denote a *printed* page number and so require an offset.
+PRINTED_REFS = frozenset({PageRef.PRINTED_ARABIC, PageRef.PRINTED_ROMAN})
 
 
 class PageMapSource(StrEnum):
@@ -48,25 +72,72 @@ class PageMapSource(StrEnum):
 
 
 @dataclass(frozen=True, slots=True)
+class Folio:
+    """A page number observed printed on a page."""
+
+    number: int
+    ref: PageRef  # PRINTED_ARABIC or PRINTED_ROMAN
+
+
+@dataclass(frozen=True, slots=True)
+class FolioVote:
+    """The winning offset for one numbering scheme, and how well supported."""
+
+    offset: int
+    consensus: float
+    observations: int
+
+
+@dataclass(frozen=True, slots=True)
 class PageMap:
     """Resolved mapping from printed page numbers to PDF page indices.
 
-    `pdf_page = printed_page + offset`, both 1-indexed.
+    Books number their front matter and their body separately, so one offset
+    is not enough: `offset` maps the arabic body, `roman_offset` maps the roman
+    front matter. Both are 1-indexed, `pdf_page = printed_page + offset`.
     """
 
     offset: int
     confidence: float
     source: PageMapSource
     detail: str = ""
+    roman_offset: int | None = None
 
-    def to_pdf_page(self, printed_page: int, total_pages: int) -> int:
-        """Map a printed page number onto a 1-indexed PDF page, clamped in range."""
-        return max(1, min(total_pages, printed_page + self.offset))
+    def to_pdf_page(
+        self,
+        page: int,
+        total_pages: int,
+        ref: PageRef = PageRef.PRINTED_ARABIC,
+    ) -> int:
+        """Map a page number in frame `ref` onto a 1-indexed PDF page."""
+        if ref == PageRef.PDF:
+            return max(1, min(total_pages, page))
+
+        if ref == PageRef.PRINTED_ROMAN:
+            # Front matter is usually numbered from the very first PDF page, so
+            # an offset of 0 is the right guess when nothing was observed.
+            pdf_page = page + (
+                self.roman_offset if self.roman_offset is not None else 0
+            )
+            # Roman numbering only ever covers the front matter, which is
+            # exactly the pages preceding printed arabic page 1.
+            if self.offset > 0:
+                pdf_page = min(pdf_page, self.offset)
+            return max(1, min(total_pages, pdf_page))
+
+        return max(1, min(total_pages, page + self.offset))
 
 
 # A folio is a short bare integer on its own line. Cap the width so that stray
 # years ("2019") and equation numbers are less likely to be mistaken for one.
 _FOLIO_RE = re.compile(r"^(\d{1,4})$")
+
+_ROMAN_RE = re.compile(r"^[IVXLCDM]+$", re.IGNORECASE)
+_ROMAN_VALUES = {"I": 1, "V": 5, "X": 10, "L": 50, "C": 100, "D": 500, "M": 1000}
+
+# Front matter never runs to hundreds of pages, so a large roman value is a
+# misparse — most often a stray capital ("C", "D", "M") on its own line.
+_MAX_ROMAN_PAGE = 100
 
 # Leading section number of a TOC title: "1.6.2 Integration to the Limit".
 _SECTION_NUM_RE = re.compile(r"^(\d+(?:\.\d+)*)[.\)]?\s+")
@@ -85,9 +156,66 @@ _MIN_FOLIO_OBSERVATIONS = 5
 _STRONG_FOLIO_OBSERVATIONS = 10
 _STRONG_FOLIO_CONSENSUS = 0.8
 _MIN_FOLIO_CONSENSUS = 0.6
+# Front matter is short, so roman folios are few even when detection works.
+_MIN_ROMAN_OBSERVATIONS = 3
 
 
-def folios_from_text(text: str) -> tuple[int, ...]:
+def roman_to_int(text: str) -> int | None:
+    """Parse a roman numeral, or None if `text` is not one."""
+    text = text.strip().upper()
+    if not text or not _ROMAN_RE.match(text):
+        return None
+
+    total = 0
+    previous = 0
+    for char in reversed(text):
+        value = _ROMAN_VALUES[char]
+        total += -value if value < previous else value
+        previous = max(previous, value)
+    return total if total > 0 else None
+
+
+def int_to_roman(number: int) -> str:
+    """Render a positive integer as a lowercase roman numeral."""
+    numerals = (
+        (1000, "m"), (900, "cm"), (500, "d"), (400, "cd"),
+        (100, "c"), (90, "xc"), (50, "l"), (40, "xl"),
+        (10, "x"), (9, "ix"), (5, "v"), (4, "iv"), (1, "i"),
+    )  # fmt: skip
+    out: list[str] = []
+    for value, numeral in numerals:
+        count, number = divmod(number, value)
+        out.append(numeral * count)
+    return "".join(out)
+
+
+def parse_page_label(value: object) -> tuple[int, PageRef] | None:
+    """Parse a page number as printed, keeping its numbering scheme.
+
+    `"ix"` and `9` are different pages; collapsing the roman one to an integer
+    loses the only signal that it belongs to the front matter.
+    """
+    if isinstance(value, bool):  # bool is an int subclass; never a page number
+        return None
+    if isinstance(value, int):
+        return (value, PageRef.PRINTED_ARABIC) if value > 0 else None
+    if not isinstance(value, str):
+        return None
+
+    text = value.strip()
+    if _FOLIO_RE.match(text):
+        return (int(text), PageRef.PRINTED_ARABIC) if int(text) > 0 else None
+    if (roman := roman_to_int(text)) is not None and roman <= _MAX_ROMAN_PAGE:
+        return roman, PageRef.PRINTED_ROMAN
+    return None
+
+
+def format_page_label(page: int, ref: PageRef) -> str:
+    """Render a page number back in its own numbering scheme."""
+    return int_to_roman(page) if ref == PageRef.PRINTED_ROMAN else str(page)
+
+
+def folios_from_text(text: str) -> tuple[Folio, ...]:
     """Folio candidates from a page's plain text: the first and last lines.
 
     Running headers push the folio to the last line on some pages and the first
@@ -96,34 +224,38 @@ def folios_from_text(text: str) -> tuple[int, ...]:
     lines = [line.strip() for line in text.splitlines() if line.strip()]
     if not lines:
         return ()
-    candidates = {lines[0], lines[-1]}
-    folios = {int(m.group(1)) for line in candidates if (m := _FOLIO_RE.match(line))}
-    return tuple(sorted(f for f in folios if f > 0))
+
+    folios: set[Folio] = set()
+    for line in {lines[0], lines[-1]}:
+        if (parsed := parse_page_label(line)) is not None:
+            number, ref = parsed
+            folios.add(Folio(number, ref))
+    return tuple(sorted(folios, key=lambda f: (f.ref, f.number)))
 
 
 def offset_from_folios(
-    folios_by_page: Mapping[int, Iterable[int]],
-) -> tuple[int, float, int] | None:
-    """Vote on the offset implied by observed folios.
+    folios_by_page: Mapping[int, Iterable[Folio]],
+) -> dict[PageRef, FolioVote]:
+    """Vote on the offset implied by observed folios, per numbering scheme.
 
     Args:
-        folios_by_page: 1-indexed PDF page -> folio candidates seen on it.
+        folios_by_page: 1-indexed PDF page -> folios seen on it.
 
     Returns:
-        `(offset, consensus, observations)`, or None if nothing was observed.
-        `consensus` is the winning offset's share of all votes.
+        A `FolioVote` per scheme that had any observations. `consensus` is the
+        winning offset's share of the votes cast within that scheme.
     """
-    votes: Counter[int] = Counter()
+    votes: defaultdict[PageRef, Counter[int]] = defaultdict(Counter)
     for pdf_page, folios in folios_by_page.items():
         for folio in folios:
-            votes[pdf_page - folio] += 1
+            votes[folio.ref][pdf_page - folio.number] += 1
 
-    total = sum(votes.values())
-    if not total:
-        return None
-
-    offset, count = votes.most_common(1)[0]
-    return offset, count / total, total
+    result: dict[PageRef, FolioVote] = {}
+    for ref, counter in votes.items():
+        total = sum(counter.values())
+        offset, count = counter.most_common(1)[0]
+        result[ref] = FolioVote(offset, count / total, total)
+    return result
 
 
 def _probe_terms(title: str) -> tuple[str | None, tuple[str, ...]]:
@@ -236,7 +368,7 @@ def offset_from_keywords(
 
 
 def resolve_page_map(
-    folios_by_page: Mapping[int, Iterable[int]],
+    folios_by_page: Mapping[int, Iterable[Folio]],
     titled_pages: Sequence[tuple[str, int]],
     page_text: Callable[[int], str],
     total_pages: int,
@@ -246,29 +378,48 @@ def resolve_page_map(
     """Resolve the printed -> PDF page mapping from all available evidence.
 
     Args:
-        folios_by_page: 1-indexed PDF page -> folio candidates seen on it.
-        titled_pages: `(title, printed_page)` pairs from the extracted TOC.
+        folios_by_page: 1-indexed PDF page -> folios seen on it.
+        titled_pages: `(title, printed_arabic_page)` pairs from the TOC.
         page_text: 1-indexed PDF page -> its text.
         total_pages: Page count of the document.
         label_offset: `(offset, detail)` derived from the PDF's `/PageLabels`.
         skip_pages: 1-indexed PDF pages to ignore during keyword search.
     """
-    folio = offset_from_folios(folios_by_page)
+    votes = offset_from_folios(folios_by_page)
+    arabic = votes.get(PageRef.PRINTED_ARABIC)
+
+    # The roman front matter is short, so its vote is always a small one; take
+    # it whenever it is self-consistent, independently of the arabic evidence.
+    roman_vote = votes.get(PageRef.PRINTED_ROMAN)
+    roman_offset = (
+        roman_vote.offset
+        if roman_vote is not None
+        and roman_vote.observations >= _MIN_ROMAN_OBSERVATIONS
+        and roman_vote.consensus >= _MIN_FOLIO_CONSENSUS
+        else None
+    )
+
+    def folio_map(vote: FolioVote) -> PageMap:
+        roman_detail = "" if roman_offset is None else f", roman {roman_offset:+d}"
+        return PageMap(
+            offset=vote.offset,
+            confidence=vote.consensus,
+            source=PageMapSource.FOLIO,
+            detail=(
+                f"{vote.observations} folios, "
+                f"{vote.consensus:.0%} agreement{roman_detail}"
+            ),
+            roman_offset=roman_offset,
+        )
 
     # Observed folios beat everything when they agree overwhelmingly: they are
     # what the reader actually sees on the page.
     if (
-        folio is not None
-        and folio[2] >= _STRONG_FOLIO_OBSERVATIONS
-        and folio[1] >= _STRONG_FOLIO_CONSENSUS
+        arabic is not None
+        and arabic.observations >= _STRONG_FOLIO_OBSERVATIONS
+        and arabic.consensus >= _STRONG_FOLIO_CONSENSUS
     ):
-        offset, consensus, observations = folio
-        return PageMap(
-            offset=offset,
-            confidence=consensus,
-            source=PageMapSource.FOLIO,
-            detail=f"{observations} folios, {consensus:.0%} agreement",
-        )
+        return folio_map(arabic)
 
     if label_offset is not None:
         offset, detail = label_offset
@@ -277,20 +428,15 @@ def resolve_page_map(
             confidence=0.9,
             source=PageMapSource.PAGE_LABELS,
             detail=detail,
+            roman_offset=roman_offset,
         )
 
     if (
-        folio is not None
-        and folio[2] >= _MIN_FOLIO_OBSERVATIONS
-        and folio[1] >= _MIN_FOLIO_CONSENSUS
+        arabic is not None
+        and arabic.observations >= _MIN_FOLIO_OBSERVATIONS
+        and arabic.consensus >= _MIN_FOLIO_CONSENSUS
     ):
-        offset, consensus, observations = folio
-        return PageMap(
-            offset=offset,
-            confidence=consensus,
-            source=PageMapSource.FOLIO,
-            detail=f"{observations} folios, {consensus:.0%} agreement",
-        )
+        return folio_map(arabic)
 
     keyword = offset_from_keywords(
         titled_pages, page_text, total_pages, skip_pages=skip_pages
@@ -302,6 +448,7 @@ def resolve_page_map(
             confidence=agreement,
             source=PageMapSource.KEYWORD,
             detail=f"{round(agreement * probes)}/{probes} probes agree",
+            roman_offset=roman_offset,
         )
 
     return PageMap(
@@ -309,4 +456,5 @@ def resolve_page_map(
         confidence=0.0,
         source=PageMapSource.DEFAULT,
         detail="no page-number evidence found",
+        roman_offset=roman_offset,
     )

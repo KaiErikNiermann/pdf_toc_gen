@@ -12,6 +12,7 @@ from typing import Any
 import requests
 
 from pdftoc.models import TocEntry
+from pdftoc.page_labels import PageRef, parse_page_label
 
 _SYSTEM_PROMPT = (
     "You extract table of contents entries from OCR text. "
@@ -19,7 +20,10 @@ _SYSTEM_PROMPT = (
     '{"level":N,"title":"...","page":N_or_null}. '
     "level: 1=part, 2=chapter, 3=section (N.N), 4=subsection (N.N.N). "
     "Include number prefixes in titles (e.g. '1. Introduction', '3.2 Linear FM Signals'). "
-    "Convert roman numerals to integers (xix=19, xxiii=23, xxv=25, etc.). "
+    "Copy the page number EXACTLY as printed: roman numerals stay roman "
+    'strings ("ix", "xxiii"), arabic stay integers (19). Front matter is '
+    "numbered separately from the body, so converting roman to arabic would "
+    "point the entry at the wrong page. "
     "Set page to null if no page number is visible for that entry. "
     "JSON array only, no markdown fences, no explanation."
 )
@@ -320,33 +324,38 @@ def _extract_ollama(
 
 def _deduplicate(raw_entries: list[dict[str, Any]], verbose: bool) -> list[TocEntry]:
     """Deduplicate and convert raw dicts to TocEntry list."""
-    seen: set[tuple[str, int | None]] = set()
+    seen: set[tuple[str, int, PageRef]] = set()
     result: list[TocEntry] = []
 
     for entry in raw_entries:
         title = str(entry.get("title", "")).strip()
-        page = entry.get("page")
-        level = int(entry.get("level", 2))
-
         if not title:
             continue
 
-        level = max(1, min(4, level))
+        # Keeps roman numerals distinct from arabic: "ix" is a front matter
+        # page, not page 9 of the body.
+        parsed = parse_page_label(entry.get("page"))
+        if parsed is None:
+            continue
+        page, page_ref = parsed
 
-        if page is not None:
-            try:
-                page = int(page)
-            except (ValueError, TypeError):
-                page = None
-
-        key = (title.lower(), page)
-        if key not in seen:
-            seen.add(key)
-            if page is not None:
-                result.append(TocEntry(level=level, title=title, page=page))
+        key = (title.lower(), page, page_ref)
+        if key in seen:
+            continue
+        seen.add(key)
+        result.append(
+            TocEntry(
+                level=max(1, min(4, int(entry.get("level", 2)))),
+                title=title,
+                page=page,
+                page_ref=page_ref,
+            )
+        )
 
     if verbose:
-        print(f"  LLM extracted {len(result)} entries with page numbers")
+        roman = sum(1 for e in result if e.page_ref == PageRef.PRINTED_ROMAN)
+        suffix = f" ({roman} in roman-numbered front matter)" if roman else ""
+        print(f"  LLM extracted {len(result)} entries with page numbers{suffix}")
 
     return result
 

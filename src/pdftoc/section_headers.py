@@ -8,6 +8,7 @@ import fitz  # type: ignore
 import yaml
 
 from pdftoc.models import TocEntry
+from pdftoc.page_labels import PageRef
 
 
 def _load_word_list(filename: str) -> set[str]:
@@ -117,7 +118,7 @@ def extract_section_headers(
             i += 1
 
     # Sort by page, then by level
-    toc_entries.sort(key=lambda e: (e.page, e.level))
+    toc_entries.sort(key=lambda e: e.sort_key)
 
     if verbose:
         print(f"Found {len(toc_entries)} section headers")
@@ -238,7 +239,12 @@ def _try_match_section_pattern(line: str, page_num: int) -> TocEntry | None:
         num = chapter_match.group(2)
         title = chapter_match.group(3).strip()
         if title and len(title) > 2:
-            return TocEntry(level=1, title=f"Chapter {num}: {title}", page=page_num)
+            return TocEntry(
+                level=1,
+                title=f"Chapter {num}: {title}",
+                page=page_num,
+                page_ref=PageRef.PDF,
+            )
 
     # Pattern: "N.N.N Title" (sub-subsection)
     subsubsec_match = re.match(r"^(\d+\.\d+\.\d+)\s+(.+)$", line)
@@ -246,7 +252,9 @@ def _try_match_section_pattern(line: str, page_num: int) -> TocEntry | None:
         num = subsubsec_match.group(1)
         title = subsubsec_match.group(2).strip()
         if len(title) >= 3:
-            return TocEntry(level=4, title=f"{num} {title}", page=page_num)
+            return TocEntry(
+                level=4, title=f"{num} {title}", page=page_num, page_ref=PageRef.PDF
+            )
 
     # Pattern: "N.N Title" (subsection)
     subsec_match = re.match(r"^(\d+\.\d+)\s+(.+)$", line)
@@ -254,7 +262,9 @@ def _try_match_section_pattern(line: str, page_num: int) -> TocEntry | None:
         num = subsec_match.group(1)
         title = subsec_match.group(2).strip()
         if len(title) >= 3:
-            return TocEntry(level=3, title=f"{num} {title}", page=page_num)
+            return TocEntry(
+                level=3, title=f"{num} {title}", page=page_num, page_ref=PageRef.PDF
+            )
 
     # Pattern: "N. Title" or "N Title" (main section)
     sec_match = re.match(r"^(\d{1,2})\.?\s+(.+)$", line)
@@ -262,6 +272,8 @@ def _try_match_section_pattern(line: str, page_num: int) -> TocEntry | None:
         num = sec_match.group(1)
         title = sec_match.group(2).strip()
         if len(title) >= 3 and int(num) <= 20:
-            return TocEntry(level=2, title=f"{num}. {title}", page=page_num)
+            return TocEntry(
+                level=2, title=f"{num}. {title}", page=page_num, page_ref=PageRef.PDF
+            )
 
     return None

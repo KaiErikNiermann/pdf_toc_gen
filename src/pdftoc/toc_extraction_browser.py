@@ -12,14 +12,38 @@ handles the PDF reading/writing via pdf.js and pdf-lib.
 import re
 from dataclasses import dataclass
 
+from pdftoc.page_labels import (
+    PageMap,
+    PageMapSource,
+    PageRef,
+    folios_from_text,
+    parse_page_label,
+    resolve_page_map,
+)
+
 
 @dataclass
 class TocEntry:
-    """A table of contents entry."""
+    """A table of contents entry.
+
+    `page` is meaningless without `page_ref`: printed page 9 of the body,
+    printed page "ix" of the front matter and PDF page 9 are three different
+    pages.
+    """
 
     level: int
     title: str
     page: int
+    page_ref: PageRef = PageRef.PRINTED_ARABIC
+
+    @property
+    def sort_key(self) -> tuple[int, int, int]:
+        """Document order: front matter precedes the body, whatever the digits."""
+        return (
+            0 if self.page_ref == PageRef.PRINTED_ROMAN else 1,
+            self.page,
+            self.level,
+        )
 
 
 def extract_toc_from_pages(
@@ -97,7 +121,7 @@ def extract_toc_from_pages(
         )
 
     # Sort by page number, then by level
-    toc_entries.sort(key=lambda e: (e.page, e.level))
+    toc_entries.sort(key=lambda e: e.sort_key)
 
     if verbose:
         print(f"Found {len(toc_entries)} TOC entries")
@@ -283,10 +307,14 @@ def _try_parse_toc_entry(
         if not re.match(r"^\d+$", title_line) and not re.match(
             r"^[IVXivx]+$", title_line
         ):
-            page_num = _parse_page_number(page_line, total_pages)
-            if page_num is not None:
+            parsed = _parse_page_number(page_line, total_pages)
+            if parsed is not None:
+                page, page_ref = parsed
                 title = f"{num}. {title_line}"
-                return (TocEntry(level=2, title=title, page=page_num), idx + 3)
+                return (
+                    TocEntry(level=2, title=title, page=page, page_ref=page_ref),
+                    idx + 3,
+                )
 
     # Check for Part pattern: Roman numeral like "I", "II", "III"
     part_match = re.match(r"^([IVX]+)$", line, re.IGNORECASE)
@@ -298,19 +326,25 @@ def _try_parse_toc_entry(
         if not re.match(r"^\d+$", title_line) and not re.match(
             r"^[IVXivx]+$", title_line
         ):
-            page_num = _parse_page_number(page_line, total_pages)
-            if page_num is not None:
+            parsed = _parse_page_number(page_line, total_pages)
+            if parsed is not None:
+                page, page_ref = parsed
                 title = f"Part {roman}: {title_line}"
-                return (TocEntry(level=1, title=title, page=page_num), idx + 3)
+                return (
+                    TocEntry(level=1, title=title, page=page, page_ref=page_ref),
+                    idx + 3,
+                )
 
     # Check for simple "Title" followed by "page" pattern
     if re.match(r"^[A-Z][A-Za-z\s,\-:]+$", line) and idx + 1 < len(lines):
         page_line = lines[idx + 1]
-        page_num = _parse_page_number(page_line, total_pages)
-        if page_num is not None:
-            if idx + 2 < len(lines) and re.match(r"^\d+$", lines[idx + 2]):
-                return (TocEntry(level=2, title=line, page=page_num), idx + 2)
-            return (TocEntry(level=2, title=line, page=page_num), idx + 2)
+        parsed = _parse_page_number(page_line, total_pages)
+        if parsed is not None:
+            page, page_ref = parsed
+            return (
+                TocEntry(level=2, title=line, page=page, page_ref=page_ref),
+                idx + 2,
+            )
 
     # Check for subsection pattern: "1.1" or "1.2.3"
     subsec_match = re.match(r"^(\d+(?:\.\d+)+)$", line)
@@ -320,53 +354,31 @@ def _try_parse_toc_entry(
         page_line = lines[idx + 2]
 
         if not re.match(r"^\d+$", title_line):
-            page_num = _parse_page_number(page_line, total_pages)
-            if page_num is not None:
+            parsed = _parse_page_number(page_line, total_pages)
+            if parsed is not None:
+                page, page_ref = parsed
                 level = num.count(".") + 2
                 title = f"{num} {title_line}"
-                return (TocEntry(level=level, title=title, page=page_num), idx + 3)
+                return (
+                    TocEntry(level=level, title=title, page=page, page_ref=page_ref),
+                    idx + 3,
+                )
 
     return None
 
 
-def _parse_page_number(s: str, total_pages: int) -> int | None:
-    """Parse a page number string, handling both arabic and roman numerals."""
-    s = s.strip().lower()
+def _parse_page_number(s: str, total_pages: int) -> tuple[int, PageRef] | None:
+    """Parse a printed page number, keeping its numbering scheme.
 
-    # Try arabic numeral
-    if re.match(r"^\d+$", s):
-        num = int(s)
-        if 1 <= num <= total_pages + 50:
-            return num
+    Roman numerals must stay tagged as roman: they belong to the front
+    matter, which is numbered independently of the body.
+    """
+    parsed = parse_page_label(s)
+    if parsed is None:
         return None
-
-    # Try roman numeral (for preface pages etc.)
-    roman_map = {
-        "i": 1,
-        "ii": 2,
-        "iii": 3,
-        "iv": 4,
-        "v": 5,
-        "vi": 6,
-        "vii": 7,
-        "viii": 8,
-        "ix": 9,
-        "x": 10,
-        "xi": 11,
-        "xii": 12,
-        "xiii": 13,
-        "xiv": 14,
-        "xv": 15,
-        "xvi": 16,
-        "xvii": 17,
-        "xviii": 18,
-        "xix": 19,
-        "xx": 20,
-    }
-    if s in roman_map:
-        return roman_map[s]
-
-    return None
+    if parsed[1] == PageRef.PRINTED_ARABIC and parsed[0] > total_pages + 50:
+        return None
+    return parsed
 
 
 def normalize_levels(toc_entries: list[TocEntry]) -> list[TocEntry]:
@@ -378,7 +390,12 @@ def normalize_levels(toc_entries: list[TocEntry]) -> list[TocEntry]:
 
     min_level = min(e.level for e in toc_entries)
     shifted = [
-        TocEntry(level=e.level - min_level + 1, title=e.title, page=e.page)
+        TocEntry(
+            level=e.level - min_level + 1,
+            title=e.title,
+            page=e.page,
+            page_ref=e.page_ref,
+        )
         for e in toc_entries
     ]
 
@@ -388,7 +405,14 @@ def normalize_levels(toc_entries: list[TocEntry]) -> list[TocEntry]:
         new_level = entry.level
         if new_level > prev_level + 1:
             new_level = prev_level + 1
-        result.append(TocEntry(level=new_level, title=entry.title, page=entry.page))
+        result.append(
+            TocEntry(
+                level=new_level,
+                title=entry.title,
+                page=entry.page,
+                page_ref=entry.page_ref,
+            )
+        )
         prev_level = new_level
 
     return result
@@ -408,10 +432,25 @@ def find_page_offset(
     Returns:
         Offset such that: pdf_page = printed_page + offset
     """
-    from pdftoc.page_labels import folios_from_text, resolve_page_map
+    return find_page_map(page_texts, toc_entries, verbose).offset
 
+
+def find_page_map(
+    page_texts: list[str], toc_entries: list[TocEntry], verbose: bool = False
+) -> PageMap:
+    """
+    Resolve the printed -> PDF page mapping for a document.
+
+    Args:
+        page_texts: Text content of all pages
+        toc_entries: Extracted TOC entries
+        verbose: Whether to print debug info
+
+    Returns:
+        A PageMap covering the arabic body and the roman front matter.
+    """
     if not toc_entries:
-        return 0
+        return PageMap(0, 0.0, PageMapSource.DEFAULT, "no TOC entries")
 
     total_pages = len(page_texts)
 
@@ -429,7 +468,11 @@ def find_page_offset(
         folios_by_page={
             i + 1: folios_from_text(text) for i, text in enumerate(page_texts)
         },
-        titled_pages=[(e.title, e.page) for e in toc_entries],
+        titled_pages=[
+            (e.title, e.page)
+            for e in toc_entries
+            if e.page_ref == PageRef.PRINTED_ARABIC and e.page >= 1
+        ],
         page_text=lambda pdf_page: page_texts[pdf_page - 1],
         total_pages=total_pages,
         skip_pages=frozenset(toc_page_indices),
@@ -441,4 +484,20 @@ def find_page_offset(
             f"via {page_map.source} ({page_map.detail})"
         )
 
-    return page_map.offset
+    return page_map
+
+
+def resolve_pdf_pages(
+    page_texts: list[str], toc_entries: list[TocEntry], verbose: bool = False
+) -> list[int]:
+    """Resolve each TOC entry to its 1-indexed PDF page.
+
+    Prefer this over `find_page_offset`: a single offset cannot express a book
+    whose front matter is numbered in roman numerals, since those pages sit on
+    a different scale from the arabic body.
+    """
+    page_map = find_page_map(page_texts, toc_entries, verbose)
+    return [
+        page_map.to_pdf_page(entry.page, len(page_texts), entry.page_ref)
+        for entry in toc_entries
+    ]

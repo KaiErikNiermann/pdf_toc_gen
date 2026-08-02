@@ -6,27 +6,88 @@ the network.
 
 from __future__ import annotations
 
+from pdftoc.models import TocEntry
 from pdftoc.page_labels import (
+    Folio,
     PageMap,
     PageMapSource,
+    PageRef,
     folios_from_text,
+    format_page_label,
     offset_from_folios,
     offset_from_keywords,
+    parse_page_label,
     resolve_page_map,
+    roman_to_int,
 )
 
 # A book with 8 pages of front matter: printed page N is PDF page N + 8.
 FRONT_MATTER = 8
 
 
+def arabic(number: int) -> Folio:
+    return Folio(number, PageRef.PRINTED_ARABIC)
+
+
+class TestRomanNumerals:
+    """Roman numerals are the front matter's own numbering scheme."""
+
+    def test_parses_common_front_matter_numerals(self) -> None:
+        assert [roman_to_int(s) for s in ("i", "iv", "ix", "xiv", "xxiii")] == [
+            1,
+            4,
+            9,
+            14,
+            23,
+        ]
+
+    def test_rejects_non_numerals(self) -> None:
+        assert roman_to_int("hello") is None
+        assert roman_to_int("") is None
+
+    def test_round_trips_through_formatting(self) -> None:
+        for n in range(1, 60):
+            assert roman_to_int(format_page_label(n, PageRef.PRINTED_ROMAN)) == n
+
+
+class TestParsePageLabel:
+    """Regression: 'ix' must not collapse to the integer 9."""
+
+    def test_keeps_roman_distinct_from_arabic(self) -> None:
+        assert parse_page_label("ix") == (9, PageRef.PRINTED_ROMAN)
+        assert parse_page_label("9") == (9, PageRef.PRINTED_ARABIC)
+        assert parse_page_label(9) == (9, PageRef.PRINTED_ARABIC)
+
+    def test_rejects_junk(self) -> None:
+        assert parse_page_label("") is None
+        assert parse_page_label("12a") is None
+        assert parse_page_label(None) is None
+        assert parse_page_label(0) is None
+
+    def test_rejects_bool(self) -> None:
+        """`bool` is an `int` subclass, so `True` would otherwise be page 1."""
+        assert parse_page_label(True) is None
+
+    def test_rejects_implausibly_large_roman(self) -> None:
+        """A stray 'M' on its own line is not page 1000 of the front matter."""
+        assert parse_page_label("MMM") is None
+
+
 class TestFoliosFromText:
     """Reading the printed page number off a page's text."""
 
     def test_reads_folio_from_first_line(self) -> None:
-        assert folios_from_text("42\nCHAPTER 3. LIMITS\nbody text here") == (42,)
+        assert folios_from_text("42\nCHAPTER 3. LIMITS\nbody text here") == (
+            arabic(42),
+        )
 
     def test_reads_folio_from_last_line(self) -> None:
-        assert folios_from_text("3.1. LIMITS\nbody text here\n43") == (43,)
+        assert folios_from_text("3.1. LIMITS\nbody text here\n43") == (arabic(43),)
+
+    def test_reads_roman_folio(self) -> None:
+        assert folios_from_text("Preface\nsome prose\nvii") == (
+            Folio(7, PageRef.PRINTED_ROMAN),
+        )
 
     def test_ignores_numbers_in_body_text(self) -> None:
         assert folios_from_text("Chapter 3\n17 is prime\nmore text") == ()
@@ -43,26 +104,34 @@ class TestOffsetFromFolios:
     """Voting on the offset implied by observed folios."""
 
     def test_unanimous_folios_give_exact_offset(self) -> None:
-        folios = {pdf: (pdf - FRONT_MATTER,) for pdf in range(9, 60)}
-        result = offset_from_folios(folios)
-        assert result is not None
-        offset, consensus, observations = result
-        assert offset == FRONT_MATTER
-        assert consensus == 1.0
-        assert observations == 51
+        folios = {pdf: (arabic(pdf - FRONT_MATTER),) for pdf in range(9, 60)}
+        vote = offset_from_folios(folios)[PageRef.PRINTED_ARABIC]
+        assert vote.offset == FRONT_MATTER
+        assert vote.consensus == 1.0
+        assert vote.observations == 51
 
     def test_tolerates_a_few_stray_readings(self) -> None:
-        folios: dict[int, tuple[int, ...]] = {
-            pdf: (pdf - FRONT_MATTER,) for pdf in range(9, 60)
+        folios: dict[int, tuple[Folio, ...]] = {
+            pdf: (arabic(pdf - FRONT_MATTER),) for pdf in range(9, 60)
         }
-        folios[20] = (999,)  # a misread number
-        result = offset_from_folios(folios)
-        assert result is not None
-        assert result[0] == FRONT_MATTER
-        assert result[1] > 0.9
+        folios[20] = (arabic(999),)  # a misread number
+        vote = offset_from_folios(folios)[PageRef.PRINTED_ARABIC]
+        assert vote.offset == FRONT_MATTER
+        assert vote.consensus > 0.9
 
-    def test_returns_none_without_observations(self) -> None:
-        assert offset_from_folios({1: (), 2: ()}) is None
+    def test_votes_separately_per_numbering_scheme(self) -> None:
+        """Front matter and body are numbered independently."""
+        folios: dict[int, tuple[Folio, ...]] = {
+            pdf: (Folio(pdf, PageRef.PRINTED_ROMAN),) for pdf in range(1, 9)
+        }
+        folios.update({pdf: (arabic(pdf - FRONT_MATTER),) for pdf in range(9, 60)})
+
+        votes = offset_from_folios(folios)
+        assert votes[PageRef.PRINTED_ARABIC].offset == FRONT_MATTER
+        assert votes[PageRef.PRINTED_ROMAN].offset == 0
+
+    def test_returns_nothing_without_observations(self) -> None:
+        assert offset_from_folios({1: (), 2: ()}) == {}
 
 
 def _synthetic_book() -> tuple[dict[int, str], list[tuple[str, int]]]:
@@ -180,3 +249,60 @@ class TestPageMapClamping:
 
     def test_maps_within_range(self) -> None:
         assert PageMap(8, 1.0, PageMapSource.FOLIO).to_pdf_page(24, 100) == 32
+
+
+class TestPageMapFrames:
+    """Each numbering scheme maps through its own offset."""
+
+    MAP = PageMap(
+        offset=FRONT_MATTER,
+        confidence=1.0,
+        source=PageMapSource.FOLIO,
+        roman_offset=0,
+    )
+
+    def test_arabic_body_uses_the_body_offset(self) -> None:
+        assert self.MAP.to_pdf_page(24, 100, PageRef.PRINTED_ARABIC) == 32
+
+    def test_roman_front_matter_uses_the_roman_offset(self) -> None:
+        """Regression: 'Preface -> ix' must land in the front matter, not on
+        PDF page 17 (which is what applying the body offset to 9 would give)."""
+        assert self.MAP.to_pdf_page(9, 100, PageRef.PRINTED_ROMAN) != 9 + FRONT_MATTER
+        assert self.MAP.to_pdf_page(3, 100, PageRef.PRINTED_ROMAN) == 3
+
+    def test_roman_pages_never_escape_the_front_matter(self) -> None:
+        """Roman numbering stops where printed arabic page 1 begins."""
+        assert self.MAP.to_pdf_page(40, 100, PageRef.PRINTED_ROMAN) <= FRONT_MATTER
+
+    def test_pdf_pages_pass_through_unshifted(self) -> None:
+        """Entries found by scanning the document are already PDF pages."""
+        assert self.MAP.to_pdf_page(32, 100, PageRef.PDF) == 32
+
+    def test_roman_defaults_to_front_of_document(self) -> None:
+        no_roman = PageMap(FRONT_MATTER, 1.0, PageMapSource.FOLIO)
+        assert no_roman.to_pdf_page(3, 100, PageRef.PRINTED_ROMAN) == 3
+
+
+class TestTocEntryFrames:
+    """`TocEntry` carries the frame its page number is expressed in."""
+
+    def test_defaults_to_printed_arabic(self) -> None:
+        assert TocEntry(level=1, title="Ch 1", page=5).page_ref == (
+            PageRef.PRINTED_ARABIC
+        )
+
+    def test_renders_roman_pages_as_printed(self) -> None:
+        entry = TocEntry(
+            level=1, title="Preface", page=9, page_ref=PageRef.PRINTED_ROMAN
+        )
+        assert entry.page_label == "ix"
+
+    def test_front_matter_sorts_before_the_body(self) -> None:
+        preface = TocEntry(
+            level=1, title="Preface", page=9, page_ref=PageRef.PRINTED_ROMAN
+        )
+        chapter = TocEntry(level=1, title="Chapter 1", page=1)
+        assert sorted([chapter, preface], key=lambda e: e.sort_key) == [
+            preface,
+            chapter,
+        ]

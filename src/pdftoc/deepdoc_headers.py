@@ -10,6 +10,7 @@ from typing import TYPE_CHECKING
 import fitz  # type: ignore
 
 from pdftoc.models import TocEntry
+from pdftoc.page_labels import PageRef
 
 if TYPE_CHECKING:
     pass
@@ -276,7 +277,9 @@ def extract_headers_deepdoctection(
                     continue
                 seen.add(key)
 
-                entry = TocEntry(level=level, title=text, page=page_num)
+                entry = TocEntry(
+                    level=level, title=text, page=page_num, page_ref=PageRef.PDF
+                )
                 toc_entries.append(entry)
 
                 if verbose:
@@ -295,7 +298,7 @@ def extract_headers_deepdoctection(
             temp_pdf.unlink()
 
     # Sort by page, then by reading order/level
-    toc_entries.sort(key=lambda e: (e.page, e.level))
+    toc_entries.sort(key=lambda e: e.sort_key)
 
     if verbose:
         print(f"deepdoctection found {len(toc_entries)} section headers")

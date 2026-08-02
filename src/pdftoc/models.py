@@ -3,6 +3,8 @@
 from dataclasses import dataclass
 from enum import Enum, StrEnum
 
+from pdftoc.page_labels import PageRef, format_page_label
+
 
 class OcrBackend(StrEnum):
     """OCR backend selection."""
@@ -23,11 +25,32 @@ class ExtractionMode(Enum):
 
 @dataclass
 class TocEntry:
-    """A table of contents entry."""
+    """A table of contents entry.
+
+    `page` is meaningless without `page_ref`: printed page 9 of the body,
+    printed page "ix" of the front matter and PDF page 9 are three different
+    pages. Entries scraped from a TOC carry printed numbers; entries found by
+    scanning the document itself carry `PageRef.PDF`.
+    """
 
     level: int
     title: str
     page: int
+    page_ref: PageRef = PageRef.PRINTED_ARABIC
+
+    @property
+    def page_label(self) -> str:
+        """The page number as printed, e.g. `"ix"` for roman front matter."""
+        return format_page_label(self.page, self.page_ref)
+
+    @property
+    def sort_key(self) -> tuple[int, int, int]:
+        """Document order: front matter precedes the body, whatever the digits."""
+        return (
+            0 if self.page_ref == PageRef.PRINTED_ROMAN else 1,
+            self.page,
+            self.level,
+        )
 
 
 def format_toc_plaintext(
@@ -62,7 +85,7 @@ def format_toc_plaintext(
 
         if show_page_numbers:
             # Calculate space for dot leaders
-            page_str = str(entry.page)
+            page_str = entry.page_label
             # Leave room for at least 3 dots and the page number
             available_width = page_width - len(title) - len(page_str) - 2
 

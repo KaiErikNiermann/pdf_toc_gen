@@ -5,6 +5,7 @@ import re
 import fitz  # type: ignore
 
 from pdftoc.models import TocEntry
+from pdftoc.page_labels import PageRef, parse_page_label
 
 
 def extract_toc_from_text(
@@ -92,11 +93,11 @@ def extract_toc_from_text(
             toc_text, verbose=verbose, backend=LlmBackend.AUTO
         )
         if toc_entries:
-            toc_entries.sort(key=lambda e: (e.page, e.level))
+            toc_entries.sort(key=lambda e: e.sort_key)
             if verbose:
                 print(f"Found {len(toc_entries)} TOC entries via LLM")
                 for entry in toc_entries[:15]:
-                    print(f"  L{entry.level}: {entry.title} -> p.{entry.page}")
+                    print(f"  L{entry.level}: {entry.title} -> p.{entry.page_label}")
                 if len(toc_entries) > 15:
                     print(f"  ... and {len(toc_entries) - 15} more")
             return toc_entries
@@ -120,12 +121,12 @@ def extract_toc_from_text(
         )
 
     # Sort by page number, then by level
-    toc_entries.sort(key=lambda e: (e.page, e.level))
+    toc_entries.sort(key=lambda e: e.sort_key)
 
     if verbose:
         print(f"Found {len(toc_entries)} TOC entries")
         for entry in toc_entries[:15]:
-            print(f"  L{entry.level}: {entry.title} -> p.{entry.page}")
+            print(f"  L{entry.level}: {entry.title} -> p.{entry.page_label}")
         if len(toc_entries) > 15:
             print(f"  ... and {len(toc_entries) - 15} more")
 
@@ -269,10 +270,10 @@ def _extract_line_by_line_format(
             i += 1
 
     # Deduplicate
-    seen: set[tuple[str, int]] = set()
+    seen: set[tuple[str, int, PageRef]] = set()
     unique_entries: list[TocEntry] = []
     for entry in toc_entries:
-        key = (entry.title.lower(), entry.page)
+        key = (entry.title.lower(), entry.page, entry.page_ref)
         if key not in seen:
             seen.add(key)
             unique_entries.append(entry)
@@ -302,10 +303,14 @@ def _try_parse_toc_entry(
             r"^[IVXivx]+$", title_line
         ):
             # Page could be number or roman numeral
-            page_num = _parse_page_number(page_line, total_pages)
-            if page_num is not None:
+            parsed = _parse_page_number(page_line, total_pages)
+            if parsed is not None:
+                page, page_ref = parsed
                 title = f"{num}. {title_line}"
-                return (TocEntry(level=2, title=title, page=page_num), idx + 3)
+                return (
+                    TocEntry(level=2, title=title, page=page, page_ref=page_ref),
+                    idx + 3,
+                )
 
     # Check for Part pattern: Roman numeral like "I", "II", "III"
     part_match = re.match(r"^([IVX]+)$", line, re.IGNORECASE)
@@ -317,22 +322,26 @@ def _try_parse_toc_entry(
         if not re.match(r"^\d+$", title_line) and not re.match(
             r"^[IVXivx]+$", title_line
         ):
-            page_num = _parse_page_number(page_line, total_pages)
-            if page_num is not None:
+            parsed = _parse_page_number(page_line, total_pages)
+            if parsed is not None:
+                page, page_ref = parsed
                 title = f"Part {roman}: {title_line}"
-                return (TocEntry(level=1, title=title, page=page_num), idx + 3)
+                return (
+                    TocEntry(level=1, title=title, page=page, page_ref=page_ref),
+                    idx + 3,
+                )
 
     # Check for simple "Title" followed by "page" pattern (e.g., "Preface" -> "ix")
     # Title should start with capital letter and be reasonable text
     if re.match(r"^[A-Z][A-Za-z\s,\-:]+$", line) and idx + 1 < len(lines):
         page_line = lines[idx + 1]
-        page_num = _parse_page_number(page_line, total_pages)
-        if page_num is not None:
-            # Make sure this isn't a chapter number we're about to see
-            if idx + 2 < len(lines) and re.match(r"^\d+$", lines[idx + 2]):
-                # This might be "Title\nPage\nChapterNum" - skip
-                return (TocEntry(level=2, title=line, page=page_num), idx + 2)
-            return (TocEntry(level=2, title=line, page=page_num), idx + 2)
+        parsed = _parse_page_number(page_line, total_pages)
+        if parsed is not None:
+            page, page_ref = parsed
+            return (
+                TocEntry(level=2, title=line, page=page, page_ref=page_ref),
+                idx + 2,
+            )
 
     # Check for subsection pattern: "1.1" or "1.2.3" (number only, title on next line)
     subsec_match = re.match(r"^(\d+(?:\.\d+)+)$", line)
@@ -342,11 +351,15 @@ def _try_parse_toc_entry(
         page_line = lines[idx + 2]
 
         if not re.match(r"^\d+$", title_line):
-            page_num = _parse_page_number(page_line, total_pages)
-            if page_num is not None:
+            parsed = _parse_page_number(page_line, total_pages)
+            if parsed is not None:
+                page, page_ref = parsed
                 level = num.count(".") + 2  # 1.1 -> level 3, 1.1.1 -> level 4
                 title = f"{num} {title_line}"
-                return (TocEntry(level=level, title=title, page=page_num), idx + 3)
+                return (
+                    TocEntry(level=level, title=title, page=page, page_ref=page_ref),
+                    idx + 3,
+                )
 
     # Check for "N.N.N Title" on same line, page on next line (marker OCR format)
     inline_subsec = re.match(r"^(\d+(?:\.\d+)+)\s+(.+)$", line)
@@ -354,11 +367,14 @@ def _try_parse_toc_entry(
         num = inline_subsec.group(1)
         title = inline_subsec.group(2).strip()
         page_line = lines[idx + 1]
-        page_num = _parse_page_number(page_line, total_pages)
-        if page_num is not None and len(title) >= 3:
+        parsed = _parse_page_number(page_line, total_pages)
+        if parsed is not None and len(title) >= 3:
+            page, page_ref = parsed
             level = num.count(".") + 2
             return (
-                TocEntry(level=level, title=f"{num} {title}", page=page_num),
+                TocEntry(
+                    level=level, title=f"{num} {title}", page=page, page_ref=page_ref
+                ),
                 idx + 2,
             )
 
@@ -369,47 +385,30 @@ def _try_parse_toc_entry(
         num = inline_sec.group(1)
         title = inline_sec.group(2).strip()
         page_line = lines[idx + 1]
-        page_num = _parse_page_number(page_line, total_pages)
-        if page_num is not None and int(num) <= 20:
-            return (TocEntry(level=2, title=f"{num}. {title}", page=page_num), idx + 2)
+        parsed = _parse_page_number(page_line, total_pages)
+        if parsed is not None and int(num) <= 20:
+            page, page_ref = parsed
+            return (
+                TocEntry(
+                    level=2, title=f"{num}. {title}", page=page, page_ref=page_ref
+                ),
+                idx + 2,
+            )
 
     return None
 
 
-def _parse_roman_numeral(s: str) -> int | None:
-    """Parse a roman numeral string to an integer, or return None."""
-    s = s.strip().upper()
-    if not s or not re.match(r"^[IVXLCDM]+$", s):
+def _parse_page_number(s: str, total_pages: int) -> tuple[int, PageRef] | None:
+    """Parse a printed page number, keeping its numbering scheme.
+
+    Roman numerals must stay tagged as roman: they belong to the front
+    matter, which is numbered independently of the body.
+    """
+    parsed = parse_page_label(s)
+    if parsed is None:
         return None
 
-    values = {"I": 1, "V": 5, "X": 10, "L": 50, "C": 100, "D": 500, "M": 1000}
-    total = 0
-    prev = 0
-    for char in reversed(s):
-        val = values.get(char, 0)
-        if val < prev:
-            total -= val
-        else:
-            total += val
-        prev = val
-
-    return total if total > 0 else None
-
-
-def _parse_page_number(s: str, total_pages: int) -> int | None:
-    """Parse a page number string, handling both arabic and roman numerals."""
-    s = s.strip()
-
-    # Try arabic numeral
-    if re.match(r"^\d+$", s):
-        num = int(s)
-        if 1 <= num <= total_pages + 50:
-            return num
+    page, page_ref = parsed
+    if page_ref == PageRef.PRINTED_ARABIC and page > total_pages + 50:
         return None
-
-    # Try roman numeral (for preface pages etc.)
-    roman = _parse_roman_numeral(s)
-    if roman is not None and roman <= 50:
-        return roman
-
-    return None
+    return parsed
