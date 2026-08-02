@@ -1,12 +1,21 @@
 """Bookmark management for PDFs."""
 
 import re
-from collections import Counter
 from pathlib import Path
 
 import fitz  # type: ignore
 
 from pdftoc.models import TocEntry
+from pdftoc.page_labels import (
+    PageMap,
+    PageMapSource,
+    folios_from_text,
+    resolve_page_map,
+)
+
+# Fraction of page height at the top and bottom treated as margin, where a
+# printed folio lives.
+_MARGIN_FRACTION = 0.12
 
 
 def get_existing_bookmarks(doc: fitz.Document) -> list[TocEntry]:
@@ -104,24 +113,17 @@ def add_bookmarks(
     doc: fitz.Document = fitz.open(pdf_path)
 
     try:
-        # Find page offset by searching for chapter/section text on expected pages
-        page_offset = _find_page_offset(doc, toc_entries, verbose)
+        page_map = find_page_map(doc, toc_entries, verbose)
 
         # Normalize levels - PyMuPDF requires first entry to be level 1
         # and levels must not skip (e.g., can't go from 1 to 3)
         normalized_entries = _normalize_levels(toc_entries)
 
         # Build TOC in PyMuPDF format: [level, title, page]
-        toc: list[list[int | str]] = []
-        for entry in normalized_entries:
-            # Apply page offset to convert printed page to PDF page
-            pdf_page = entry.page + page_offset
-            if pdf_page < 1:
-                pdf_page = 1
-            if pdf_page > len(doc):
-                pdf_page = len(doc)
-
-            toc.append([entry.level, entry.title, pdf_page])
+        toc: list[list[int | str]] = [
+            [entry.level, entry.title, page_map.to_pdf_page(entry.page, len(doc))]
+            for entry in normalized_entries
+        ]
 
         if toc:
             doc.set_toc(toc)  # type: ignore
@@ -165,85 +167,102 @@ def _normalize_levels(toc_entries: list[TocEntry]) -> list[TocEntry]:
     return result
 
 
-def _find_page_offset(
-    doc: fitz.Document, toc_entries: list[TocEntry], verbose: bool
-) -> int:
-    """
-    Find the offset between printed page numbers and PDF page indices.
+def _margin_folios(page: fitz.Page) -> tuple[int, ...]:
+    """Folio candidates from text blocks physically in a page's margins.
 
-    Returns offset such that: pdf_page = printed_page + offset
+    More reliable than reading the first/last line of the extracted text: it
+    ignores body text and running headers that happen to be bare numbers.
+    """
+    height = page.rect.height
+    if height <= 0:
+        return ()
+
+    top_band = height * _MARGIN_FRACTION
+    bottom_band = height * (1 - _MARGIN_FRACTION)
+
+    folios: set[int] = set()
+    for block in page.get_text("blocks"):
+        _x0, y0, _x1, y1, text = block[:5]
+        if y1 <= top_band or y0 >= bottom_band:
+            folios.update(folios_from_text(str(text)))
+    return tuple(sorted(folios))
+
+
+def _page_label_offset(doc: fitz.Document) -> tuple[int, str] | None:
+    """Offset implied by the PDF's own `/PageLabels`, if it declares one.
+
+    Only decimal-numbered ranges matter: a TOC cites arabic page numbers, so
+    the widest decimal range is the body of the book.
+    """
+    try:
+        labels = doc.get_page_labels()
+    except Exception:  # pragma: no cover - older PyMuPDF without the API
+        return None
+    if not labels:
+        return None
+
+    decimal_ranges = [
+        rule
+        for rule in labels
+        if str(rule.get("style", "")).upper() == "D" and not rule.get("prefix")
+    ]
+    if not decimal_ranges:
+        return None
+
+    # Widest decimal range wins; ranges are ordered by start page.
+    starts = sorted(int(rule["startpage"]) for rule in decimal_ranges)
+    widths = {
+        start: (starts[i + 1] if i + 1 < len(starts) else len(doc)) - start
+        for i, start in enumerate(starts)
+    }
+    best = max(decimal_ranges, key=lambda rule: widths[int(rule["startpage"])])
+
+    start_page = int(best["startpage"])  # 0-indexed
+    first_num = int(best.get("firstpagenum", 1) or 1)
+    offset = (start_page + 1) - first_num
+    return offset, f"/PageLabels: PDF p.{start_page + 1} is printed p.{first_num}"
+
+
+def _toc_page_indices(doc: fitz.Document) -> frozenset[int]:
+    """1-indexed PDF pages that look like the table of contents itself."""
+    indices: set[int] = set()
+    for i in range(min(15, len(doc))):
+        if "contents" in str(doc[i].get_text()).lower():
+            # The TOC usually spans a few pages; exclude its neighbours too.
+            indices.update(j for j in range(i, i + 3) if 0 <= j < len(doc))
+            if i > 0:
+                indices.add(i - 1)
+    return frozenset(i + 1 for i in indices)
+
+
+def find_page_map(
+    doc: fitz.Document, toc_entries: list[TocEntry], verbose: bool
+) -> PageMap:
+    """
+    Find the mapping between printed page numbers and PDF page indices.
+
+    Returns a PageMap such that: pdf_page = printed_page + offset
     """
     if not toc_entries:
-        return 0
+        return PageMap(0, 0.0, PageMapSource.DEFAULT, "no TOC entries")
 
-    # First, identify TOC pages to skip them during search
-    toc_page_indices: set[int] = set()
-    for i in range(min(15, len(doc))):
-        page: fitz.Page = doc[i]
-        text = page.get_text().lower()
-        if "contents" in text or "table of contents" in text:
-            toc_page_indices.add(i)
-            # Also mark adjacent pages as TOC pages
-            if i > 0:
-                toc_page_indices.add(i - 1)
-            if i + 1 < len(doc):
-                toc_page_indices.add(i + 1)
-            if i + 2 < len(doc):
-                toc_page_indices.add(i + 2)
+    folios_by_page = {i + 1: _margin_folios(doc[i]) for i in range(len(doc))}
 
-    # Try to find entries with higher page numbers (more distinctive)
-    test_entries = sorted(
-        [e for e in toc_entries if e.page > 20],
-        key=lambda x: x.page,
-    )[:5]
-
-    # If no high-page entries, fall back to any entries
-    if not test_entries:
-        test_entries = [e for e in toc_entries if e.page > 5][:5]
-
-    offsets: list[int] = []
-    for entry in test_entries:
-        # Extract keywords from title (skip numbers and common words)
-        words = re.findall(r"[A-Za-z]{5,}", entry.title)
-        if len(words) < 2:
-            continue
-
-        # Search for these words in pages around the expected location
-        # Start with offset 0 assumption
-        for test_offset in range(-20, 30):
-            pdf_page_idx = entry.page + test_offset - 1  # -1 for 0-indexing
-
-            if pdf_page_idx < 0 or pdf_page_idx >= len(doc):
-                continue
-
-            # Skip TOC pages
-            if pdf_page_idx in toc_page_indices:
-                continue
-
-            page = doc[pdf_page_idx]
-            text = page.get_text().lower()
-
-            # Check if multiple keywords appear on this page
-            matches = sum(1 for w in words if w.lower() in text)
-            if matches >= min(2, len(words)):
-                offsets.append(test_offset)
-                if verbose:
-                    print(
-                        f"  Found '{entry.title[:30]}...' at PDF page {pdf_page_idx + 1} "
-                        f"(printed: {entry.page}, offset: {test_offset})"
-                    )
-                break
-
-    if not offsets:
-        if verbose:
-            print("  Could not determine page offset, using 0")
-        return 0
-
-    # Use the most common offset
-    offset_counts = Counter(offsets)
-    best_offset = offset_counts.most_common(1)[0][0]
+    page_map = resolve_page_map(
+        folios_by_page=folios_by_page,
+        titled_pages=[(e.title, e.page) for e in toc_entries],
+        page_text=lambda pdf_page: str(doc[pdf_page - 1].get_text()),
+        total_pages=len(doc),
+        label_offset=_page_label_offset(doc),
+        skip_pages=_toc_page_indices(doc),
+    )
 
     if verbose:
-        print(f"  Detected page offset: {best_offset}")
+        print(
+            f"  Page offset {page_map.offset:+d} "
+            f"via {page_map.source} ({page_map.detail})"
+        )
+        if page_map.source == PageMapSource.DEFAULT:
+            print("  Warning: bookmarks may be misaligned")
 
-    return best_offset
+    return page_map

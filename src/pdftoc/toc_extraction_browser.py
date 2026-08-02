@@ -408,70 +408,37 @@ def find_page_offset(
     Returns:
         Offset such that: pdf_page = printed_page + offset
     """
-    from collections import Counter
+    from pdftoc.page_labels import folios_from_text, resolve_page_map
 
     if not toc_entries:
         return 0
 
     total_pages = len(page_texts)
 
-    # First, identify TOC pages to skip them during search
+    # Identify TOC pages to skip them during the keyword fallback (1-indexed).
     toc_page_indices: set[int] = set()
     for i, text in enumerate(page_texts[:15]):
-        text_lower = text.lower()
-        if "contents" in text_lower or "table of contents" in text_lower:
-            toc_page_indices.add(i)
-            if i > 0:
-                toc_page_indices.add(i - 1)
-            if i + 1 < total_pages:
-                toc_page_indices.add(i + 1)
-            if i + 2 < total_pages:
-                toc_page_indices.add(i + 2)
+        if "contents" in text.lower():
+            toc_page_indices.update(
+                j + 1 for j in range(max(0, i - 1), i + 3) if j < total_pages
+            )
 
-    # Try to find entries with higher page numbers (more distinctive)
-    test_entries = sorted(
-        [e for e in toc_entries if e.page > 20],
-        key=lambda x: x.page,
-    )[:5]
-
-    if not test_entries:
-        test_entries = [e for e in toc_entries if e.page > 5][:5]
-
-    offsets: list[int] = []
-    for entry in test_entries:
-        words = re.findall(r"[A-Za-z]{5,}", entry.title)
-        if len(words) < 2:
-            continue
-
-        for test_offset in range(-20, 30):
-            pdf_page_idx = entry.page + test_offset - 1
-
-            if pdf_page_idx < 0 or pdf_page_idx >= total_pages:
-                continue
-
-            if pdf_page_idx in toc_page_indices:
-                continue
-
-            text = page_texts[pdf_page_idx].lower()
-
-            matches = sum(1 for w in words if w.lower() in text)
-            if matches >= min(2, len(words)):
-                offsets.append(test_offset)
-                if verbose:
-                    print(
-                        f"  Found '{entry.title[:30]}...' at PDF page {pdf_page_idx + 1}"
-                    )
-                break
-
-    if not offsets:
-        if verbose:
-            print("  Could not determine page offset, using 0")
-        return 0
-
-    offset_counts = Counter(offsets)
-    best_offset = offset_counts.most_common(1)[0][0]
+    # Without page geometry (pdf.js gives us plain text only), folios can only
+    # be read off the first/last line of each page.
+    page_map = resolve_page_map(
+        folios_by_page={
+            i + 1: folios_from_text(text) for i, text in enumerate(page_texts)
+        },
+        titled_pages=[(e.title, e.page) for e in toc_entries],
+        page_text=lambda pdf_page: page_texts[pdf_page - 1],
+        total_pages=total_pages,
+        skip_pages=frozenset(toc_page_indices),
+    )
 
     if verbose:
-        print(f"  Detected page offset: {best_offset}")
+        print(
+            f"  Page offset {page_map.offset:+d} "
+            f"via {page_map.source} ({page_map.detail})"
+        )
 
-    return best_offset
+    return page_map.offset
