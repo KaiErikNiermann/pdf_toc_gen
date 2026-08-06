@@ -110,7 +110,7 @@ def _get_ocr(lang: str, device: str, enable_mkldnn: bool) -> Any:
 
 def _page_to_bgr(page: fitz.Page, dpi: int) -> Any:
     """Rasterize a PDF page to a BGR numpy array (PaddleOCR/OpenCV convention)."""
-    import numpy as np
+    import numpy as np  # pyright: ignore[reportMissingImports]
 
     pix = page.get_pixmap(dpi=dpi)
     # pixmap samples are RGB(A); reshape to (h, w, n) then drop alpha + flip to BGR.

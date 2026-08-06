@@ -74,7 +74,7 @@ def _get_analyzer() -> object:
     global _analyzer
     if _analyzer is None:
         import deepdoctection as dd  # type: ignore
-        import torch
+        import torch  # pyright: ignore[reportMissingImports]
 
         device = "cuda" if torch.cuda.is_available() else "cpu"
 

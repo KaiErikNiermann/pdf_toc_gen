@@ -49,7 +49,7 @@ def is_marker_available() -> bool:
     global _marker_available
     if _marker_available is None:
         try:
-            import marker.converters.pdf  # noqa: F401
+            import marker.converters.pdf  # noqa: F401  # pyright: ignore
 
             _marker_available = True
         except ImportError:
@@ -66,7 +66,7 @@ def unload_models() -> None:
     global _artifact_dict
     _artifact_dict = None
     try:
-        import torch
+        import torch  # pyright: ignore[reportMissingImports]
 
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
@@ -79,9 +79,12 @@ def _get_artifact_dict() -> dict[str, Any]:
     """Get or create the marker model artifacts (lazy-loaded singleton)."""
     global _artifact_dict
     if _artifact_dict is None:
-        from marker.models import create_model_dict
+        from marker.models import create_model_dict  # pyright: ignore
 
-        _artifact_dict = create_model_dict()
+        # marker is an optional extra, so its return type is unknown when the
+        # package is absent (as it is in CI); pin it to the declared shape.
+        artifacts: dict[str, Any] = create_model_dict()
+        _artifact_dict = artifacts
     return _artifact_dict
 
 
@@ -121,7 +124,7 @@ def extract_text_with_marker(
     Returns:
         Dict mapping 1-indexed page numbers to extracted text.
     """
-    import torch
+    import torch  # pyright: ignore[reportMissingImports]
 
     doc: fitz.Document = fitz.open(pdf_path)
     total_pages = len(doc)
@@ -185,8 +188,8 @@ def _process_pdf_chunk(
     verbose: bool = False,
 ) -> dict[int, str]:
     """Process a single PDF (or chunk) through marker and return page texts."""
-    from marker.config.parser import ConfigParser
-    from marker.converters.pdf import PdfConverter
+    from marker.config.parser import ConfigParser  # pyright: ignore
+    from marker.converters.pdf import PdfConverter  # pyright: ignore
 
     if verbose:
         print("Loading marker-pdf models (this may take a moment on first run)...")
