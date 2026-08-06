@@ -46,10 +46,18 @@ packages = [{include = "pdftoc", from = "src"}]
 [tool.poetry.group.dev.dependencies]
 pytest = "^8.0.0"
 ruff = "^0.15.20"
+pyright = "^1.1.411"
+radon = "^6.0.1"
+xenon = "^0.9.3"
 
 [tool.ruff]
 src = ["src", "tests"]
 target-version = "py312"
+
+[tool.ruff.lint]
+# Defaults (pyflakes + a slice of pycodestyle) plus import sorting, pyupgrade,
+# bugbear, comprehension and simplification rules.
+select = ["E4", "E7", "E9", "F", "I", "UP", "B", "SIM", "C4"]
 
 [tool.pyright]
 include = ["src/pdftoc"]
