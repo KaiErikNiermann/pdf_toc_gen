@@ -1,0 +1,73 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+# A newer push to the same branch makes an in-flight run obsolete.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  quality:
+    name: Lint, types and complexity
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: ./.github/actions/setup-python-poetry
+
+      # Each check runs even if an earlier one fails, so a single CI run
+      # reports every problem instead of only the first.
+      - name: Ruff lint
+        run: poetry run ruff check --output-format=github src tests
+
+      - name: Ruff format
+        if: ${{ !cancelled() }}
+        run: poetry run ruff format --check --diff src tests
+
+      - name: Pyright type-check
+        if: ${{ !cancelled() }}
+        run: poetry run pyright
+
+      # Ratchet: blocks any new function worse than grade D and any rise in the
+      # project average. Tighten as the legacy hot spots are refactored.
+      - name: Complexity gate
+        if: ${{ !cancelled() }}
+        run: poetry run xenon src --max-absolute D --max-average B
+
+      - name: Complexity report
+        if: ${{ !cancelled() }}
+        run: poetry run radon cc src --min C --show-complexity --total-average
+
+  test:
+    name: Tests (Python ${{ matrix.python-version }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.12", "3.13"]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: ./.github/actions/setup-python-poetry
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - name: Install Tesseract OCR
+        run: sudo apt-get update && sudo apt-get install -y tesseract-ocr
+
+      # No OPENAI_API_KEY here on purpose: tests that assert on live LLM output
+      # are marked `llm` and skip themselves rather than making CI depend on a
+      # paid third-party service.
+      - name: Run tests
+        run: poetry run pytest -v --tb=short --durations=10

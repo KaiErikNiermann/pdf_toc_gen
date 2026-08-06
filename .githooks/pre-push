@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
-# Pre-push gate: lint + format + type-check. Per project policy these run before
-# every push. Enable once after cloning with:
+# Pre-push gate: lint + format + type-check + complexity. Mirrors the `quality`
+# job in .github/workflows/ci.yml so CI rarely tells you something new. Enable
+# once after cloning with:
 #     git config core.hooksPath .githooks
 #
 # Tests are intentionally NOT run here — the suite makes live LLM calls and is
@@ -15,5 +16,8 @@ run() { echo "[pre-push] $1"; shift; "$@"; }
 run "ruff lint"          poetry run ruff check src tests
 run "ruff format check"  poetry run ruff format --check src tests
 run "pyright type-check" poetry run pyright
+# Same ratchet as CI: nothing worse than grade D, project average no worse
+# than B. `radon cc src --min C` lists the current hot spots.
+run "complexity gate"    poetry run xenon src --max-absolute D --max-average B
 
 echo "[pre-push] all checks passed ✓"

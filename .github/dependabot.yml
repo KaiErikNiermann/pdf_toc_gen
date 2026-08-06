@@ -1,0 +1,54 @@
+version: 2
+
+updates:
+  # Python dependencies (Poetry is handled by the pip ecosystem, and updates
+  # both pyproject.toml and poetry.lock).
+  - package-ecosystem: pip
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+      time: "06:00"
+      timezone: Europe/Berlin
+    open-pull-requests-limit: 5
+    commit-message:
+      prefix: build
+      prefix-development: build
+      include: scope
+    labels:
+      - dependencies
+    groups:
+      # Tooling churns fast and never affects the shipped package; one PR a
+      # week for the lot keeps the noise down.
+      dev-tools:
+        dependency-type: development
+        patterns:
+          - "*"
+      runtime-minor-patch:
+        dependency-type: production
+        update-types:
+          - minor
+          - patch
+    ignore:
+      # Pinned deliberately: 3.2+ regressed the oneDNN/mkldnn CPU path that the
+      # paddle OCR backend depends on. See docs/ocr-landscape-and-benchmarks.md.
+      - dependency-name: paddlepaddle
+        versions: [">=3.2"]
+
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+      time: "06:00"
+      timezone: Europe/Berlin
+    commit-message:
+      prefix: ci
+      include: scope
+    labels:
+      - dependencies
+      - github-actions
+    groups:
+      actions:
+        patterns:
+          - "*"

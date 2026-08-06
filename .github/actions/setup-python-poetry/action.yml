@@ -1,0 +1,40 @@
+name: Set up Python and Poetry
+description: >-
+  Installs Python and Poetry, restores the cached virtualenv, and installs the
+  project's locked dependencies. Shared by every job so the setup lives in one
+  place.
+
+inputs:
+  python-version:
+    description: Python version to install.
+    required: false
+    default: "3.13"
+
+runs:
+  using: composite
+  steps:
+    - name: Set up Python ${{ inputs.python-version }}
+      uses: actions/setup-python@v5
+      with:
+        python-version: ${{ inputs.python-version }}
+
+    - name: Install Poetry
+      uses: snok/install-poetry@v1
+      with:
+        version: latest
+        virtualenvs-create: true
+        virtualenvs-in-project: true
+
+    # Keyed on the lock file, so the cache is invalidated exactly when the
+    # dependency set changes.
+    - name: Restore cached virtualenv
+      uses: actions/cache@v4
+      with:
+        path: .venv
+        key: venv-${{ runner.os }}-py${{ inputs.python-version }}-${{ hashFiles('poetry.lock') }}
+        restore-keys: |
+          venv-${{ runner.os }}-py${{ inputs.python-version }}-
+
+    - name: Install dependencies
+      shell: bash
+      run: poetry install --no-interaction --with dev
