@@ -16,7 +16,6 @@ from pdf_test_cases import (
     get_test_pdfs_with_text,
 )
 
-
 # ============================================================================
 # Utility Functions
 # ============================================================================
@@ -25,6 +24,17 @@ from pdf_test_cases import (
 def is_tesseract_available() -> bool:
     """Check if Tesseract OCR is available on the system."""
     return shutil.which("tesseract") is not None
+
+
+def is_llm_available() -> bool:
+    """Whether TOC extraction can reach an LLM.
+
+    Uses the app's own key lookup so a local `.env` counts, matching what the
+    code under test will actually do.
+    """
+    from pdftoc.llm_toc import _load_api_key
+
+    return _load_api_key() is not None
 
 
 def _pdf_id(test_case: PdfTestCase) -> str:
@@ -85,6 +95,9 @@ def pytest_configure(config: pytest.Config) -> None:
     config.addinivalue_line(
         "markers", "requires_pdf(name): mark test as requiring a specific PDF"
     )
+    config.addinivalue_line(
+        "markers", "llm: mark test as asserting on live LLM TOC extraction"
+    )
 
 
 def pytest_collection_modifyitems(
@@ -92,12 +105,19 @@ def pytest_collection_modifyitems(
 ) -> None:
     """Skip tests based on available resources."""
     skip_ocr = pytest.mark.skip(reason="Tesseract OCR not available")
+    # TOC extraction calls an LLM first and falls back to regex, so llm-marked
+    # tests assert on model output. Without a key they cannot exercise what
+    # they were written to check, and CI has no key to give them.
+    skip_llm = pytest.mark.skip(reason="no OPENAI_API_KEY: LLM extraction skipped")
+    llm_available = is_llm_available()
 
     for item in items:
+        if "llm" in item.keywords and not llm_available:
+            item.add_marker(skip_llm)
+
         # Skip OCR tests if Tesseract isn't available
-        if "requires_ocr" in [m.name for m in item.iter_markers()]:
-            if not is_tesseract_available():
-                item.add_marker(skip_ocr)
+        if "requires_ocr" in item.keywords and not is_tesseract_available():
+            item.add_marker(skip_ocr)
 
         # Skip tests for missing PDFs
         for marker in item.iter_markers(name="requires_pdf"):

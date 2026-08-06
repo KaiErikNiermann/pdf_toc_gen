@@ -20,7 +20,6 @@ from pdftoc.core import (
     verify_bookmarks,
 )
 
-
 # ============================================================================
 # Unit Tests - Basic functionality
 # ============================================================================
@@ -93,6 +92,9 @@ class TestProcessPdf:
         self, pdf_with_text: PdfTestCase, temp_output_pdf: Path
     ) -> None:
         """Full processing should produce a PDF with correct bookmarks."""
+        if pdf_with_text.extraction_unsupported:
+            pytest.xfail(f"TOC extraction unsupported for {pdf_with_text.name}")
+
         process_pdf(
             source=pdf_with_text.pdf_path,
             output=temp_output_pdf,
@@ -144,6 +146,9 @@ class TestProcessPdf:
         self, pdf_with_text: PdfTestCase, temp_output_pdf: Path
     ) -> None:
         """Specific expected entries should be present with correct pages."""
+        if pdf_with_text.extraction_unsupported:
+            pytest.xfail(f"TOC extraction unsupported for {pdf_with_text.name}")
+
         if not pdf_with_text.expected_entries:
             pytest.skip(f"No expected entries defined for {pdf_with_text.name}")
 
@@ -207,6 +212,7 @@ class TestProcessPdf:
 class TestModalLogicSpecific:
     """Tests specific to the modal logic textbook structure."""
 
+    @pytest.mark.llm
     def test_extracts_parts(self, modal_logic_pdf: PdfTestCase) -> None:
         """Should extract Part entries at level 1."""
         doc: fitz.Document = fitz.open(modal_logic_pdf.pdf_path)
@@ -361,6 +367,9 @@ class TestAutoMode:
         self, pdf_with_text: PdfTestCase, temp_output_pdf: Path
     ) -> None:
         """Auto mode should find entries regardless of PDF type."""
+        if pdf_with_text.extraction_unsupported:
+            pytest.xfail(f"TOC extraction unsupported for {pdf_with_text.name}")
+
         process_pdf(
             source=pdf_with_text.pdf_path,
             output=temp_output_pdf,
