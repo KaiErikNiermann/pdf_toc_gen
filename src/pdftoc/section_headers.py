@@ -9,6 +9,7 @@ import yaml
 
 from pdftoc.models import TocEntry
 from pdftoc.page_labels import PageRef
+from pdftoc.pdf_text import page_text
 
 
 def _load_word_list(filename: str) -> set[str]:
@@ -63,7 +64,7 @@ def extract_section_headers(
             text = page_texts.get(page_idx + 1, "")
         else:
             page: fitz.Page = doc[page_idx]
-            text = page.get_text()
+            text = page_text(page)
         lines = [line.strip() for line in text.split("\n")]
 
         i = 0
@@ -80,34 +81,37 @@ def extract_section_headers(
             # try combining with next line (but be careful of page numbers!)
             if not entry and i + 1 < len(lines):
                 next_line = lines[i + 1]
-                if next_line and len(next_line) < 80:
-                    # Check if current line is just a number (potential section number)
-                    if re.match(r"^\d+(\.\d+)*$", line):
-                        # Skip if this looks like a page number header/footer
-                        # (single number at very top or bottom of page)
-                        is_likely_page_number = False
-                        try:
-                            num = int(line.split(".")[0])
-                            # Page numbers are typically in first 3 or last 3 lines
-                            is_header_footer_position = i < 3 or i >= len(lines) - 3
-                            # And often match the page number
-                            matches_page_num = num == page_idx + 1
-                            is_likely_page_number = (
-                                is_header_footer_position and matches_page_num
-                            )
-                        except ValueError:
-                            pass
+                # Current line is just a number (potential section number)
+                if (
+                    next_line
+                    and len(next_line) < 80
+                    and re.match(r"^\d+(\.\d+)*$", line)
+                ):
+                    # Skip if this looks like a page number header/footer
+                    # (single number at very top or bottom of page)
+                    is_likely_page_number = False
+                    try:
+                        num = int(line.split(".")[0])
+                        # Page numbers are typically in first 3 or last 3 lines
+                        is_header_footer_position = i < 3 or i >= len(lines) - 3
+                        # And often match the page number
+                        matches_page_num = num == page_idx + 1
+                        is_likely_page_number = (
+                            is_header_footer_position and matches_page_num
+                        )
+                    except ValueError:
+                        pass
 
-                        if is_likely_page_number:
-                            i += 1
-                            continue
+                    if is_likely_page_number:
+                        i += 1
+                        continue
 
-                        # Only combine if next line looks like a title (starts with capital)
-                        if re.match(r"^[A-Z][A-Za-z]", next_line):
-                            combined = f"{line} {next_line}"
-                            score, entry = _score_section_header(combined, page_idx + 1)
-                            if entry and score >= 0.4:
-                                i += 1  # Skip the next line
+                    # Only combine if next line looks like a title (starts with capital)
+                    if re.match(r"^[A-Z][A-Za-z]", next_line):
+                        combined = f"{line} {next_line}"
+                        score, entry = _score_section_header(combined, page_idx + 1)
+                        if entry and score >= 0.4:
+                            i += 1  # Skip the next line
 
             if entry and score >= 0.4:  # Threshold for acceptance
                 key = (entry.title.lower(), entry.page)
@@ -157,7 +161,7 @@ def _score_section_header(
 
     # === Academic vocabulary heuristic (0.0 - 0.35 points) ===
     # This is our strongest signal for academic papers
-    title_words = set(w.lower() for w in re.findall(r"[a-zA-Z]+", entry.title))
+    title_words = {w.lower() for w in re.findall(r"[a-zA-Z]+", entry.title)}
     academic_matches = title_words & academic_vocabulary
     if academic_matches:
         # More matches = higher confidence

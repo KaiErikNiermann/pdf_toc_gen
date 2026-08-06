@@ -60,12 +60,13 @@ def _create_truncated_pdf(
     new_doc.insert_pdf(doc, from_page=start_page, to_page=end_page - 1)
 
     # Save to temp file
-    tmp = tempfile.NamedTemporaryFile(suffix=".pdf", delete=False)
-    new_doc.save(tmp.name)
+    with tempfile.NamedTemporaryFile(suffix=".pdf", delete=False) as tmp:
+        tmp_path = Path(tmp.name)  # kept on disk deliberately; caller reads it
+    new_doc.save(tmp_path)
     new_doc.close()
     doc.close()
 
-    return Path(tmp.name)
+    return tmp_path
 
 
 def _get_analyzer() -> object:
@@ -152,10 +153,7 @@ def _is_valid_section_title(text: str) -> bool:
         return False
 
     # Looks like a reference citation
-    if re.match(r"^\[\d+\]", text):
-        return False
-
-    return True
+    return not re.match(r"^\[\d+\]", text)
 
 
 def extract_headers_deepdoctection(
@@ -307,7 +305,7 @@ def extract_headers_deepdoctection(
 
 
 def extract_section_headers_with_deepdoc(
-    doc: "fitz.Document",
+    doc: fitz.Document,
     pdf_path: Path | None,
     verbose: bool = False,
     page_texts: dict[int, str] | None = None,

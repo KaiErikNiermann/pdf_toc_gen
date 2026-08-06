@@ -6,6 +6,7 @@ import fitz  # type: ignore
 
 from pdftoc.models import TocEntry
 from pdftoc.page_labels import PageRef, parse_page_label
+from pdftoc.pdf_text import page_text
 
 
 def extract_toc_from_text(
@@ -38,7 +39,7 @@ def extract_toc_from_text(
             text = page_texts.get(i + 1, "")
         else:
             page: fitz.Page = doc[i]
-            text = page.get_text()
+            text = page_text(page)
 
         # Check if this looks like a TOC page
         toc_indicators = [

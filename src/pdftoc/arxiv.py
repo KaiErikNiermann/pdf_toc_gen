@@ -10,6 +10,8 @@ from urllib.request import Request, urlopen
 
 import fitz  # type: ignore
 
+from pdftoc.pdf_text import page_text
+
 
 def extract_arxiv_id(pdf_path: Path) -> str | None:
     """
@@ -28,7 +30,7 @@ def extract_arxiv_id(pdf_path: Path) -> str | None:
         full_text = ""
         for i in range(pages_to_check):
             page: fitz.Page = doc[i]
-            full_text += page.get_text() + "\n"
+            full_text += page_text(page) + "\n"
 
         # Patterns to match arXiv IDs
         patterns = [

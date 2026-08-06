@@ -435,6 +435,22 @@ def find_page_offset(
     return find_page_map(page_texts, toc_entries, verbose).offset
 
 
+def _toc_page_indices(page_texts: list[str]) -> frozenset[int]:
+    """1-indexed pages that look like the table of contents itself.
+
+    The keyword fallback must skip these: a TOC page mentions every section
+    title in the book and would match any offset.
+    """
+    indices: set[int] = set()
+    for i, text in enumerate(page_texts[:15]):
+        if "contents" in text.lower():
+            # The TOC usually spans a few pages; exclude its neighbours too.
+            indices.update(
+                j + 1 for j in range(max(0, i - 1), i + 3) if j < len(page_texts)
+            )
+    return frozenset(indices)
+
+
 def find_page_map(
     page_texts: list[str], toc_entries: list[TocEntry], verbose: bool = False
 ) -> PageMap:
@@ -454,14 +470,6 @@ def find_page_map(
 
     total_pages = len(page_texts)
 
-    # Identify TOC pages to skip them during the keyword fallback (1-indexed).
-    toc_page_indices: set[int] = set()
-    for i, text in enumerate(page_texts[:15]):
-        if "contents" in text.lower():
-            toc_page_indices.update(
-                j + 1 for j in range(max(0, i - 1), i + 3) if j < total_pages
-            )
-
     # Without page geometry (pdf.js gives us plain text only), folios can only
     # be read off the first/last line of each page.
     page_map = resolve_page_map(
@@ -475,7 +483,7 @@ def find_page_map(
         ],
         page_text=lambda pdf_page: page_texts[pdf_page - 1],
         total_pages=total_pages,
-        skip_pages=frozenset(toc_page_indices),
+        skip_pages=_toc_page_indices(page_texts),
     )
 
     if verbose:

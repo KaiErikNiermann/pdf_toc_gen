@@ -7,6 +7,7 @@ from pathlib import Path
 import fitz  # type: ignore
 
 from pdftoc.models import OcrBackend
+from pdftoc.pdf_text import page_text
 
 
 def pdf_has_text(pdf_path: Path) -> bool:
@@ -18,7 +19,7 @@ def pdf_has_text(pdf_path: Path) -> bool:
         total_text = 0
         for i in range(pages_to_check):
             page: fitz.Page = doc[i]
-            text = page.get_text()
+            text = page_text(page)
             total_text += len(text.strip())
         # If we have a reasonable amount of text, assume it's OCR'd
         return total_text > 100
@@ -113,7 +114,7 @@ def extract_text(
             page_texts: dict[int, str] = {}
             for i in range(len(doc)):
                 page: fitz.Page = doc[i]
-                page_texts[i + 1] = page.get_text()
+                page_texts[i + 1] = page_text(page)
             return page_texts
         finally:
             doc.close()

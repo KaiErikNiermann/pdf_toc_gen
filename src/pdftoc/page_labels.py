@@ -87,6 +87,10 @@ class FolioVote:
     consensus: float
     observations: int
 
+    def is_strong(self, min_observations: int, min_consensus: float) -> bool:
+        """Whether enough observations agree for this offset to be trusted."""
+        return self.observations >= min_observations and self.consensus >= min_consensus
+
 
 @dataclass(frozen=True, slots=True)
 class PageMap:
@@ -297,6 +301,65 @@ def _score_page(text: str, section_num: str | None, words: Sequence[str]) -> flo
     return score
 
 
+@dataclass(frozen=True, slots=True)
+class _Probe:
+    """One TOC entry used to locate the body text it names."""
+
+    printed_page: int
+    section_num: str | None
+    words: tuple[str, ...]
+
+
+def _select_probes(
+    titled_pages: Sequence[tuple[str, int]], max_probes: int
+) -> tuple[_Probe, ...]:
+    """Pick usable probes, spread evenly across the document.
+
+    Spreading matters: a wrong offset that happens to fit chapter 1 rarely
+    fits chapter 9 too.
+    """
+    probes: list[_Probe] = []
+    for title, printed in sorted(titled_pages, key=lambda tp: tp[1]):
+        if printed < 1:
+            continue
+        section_num, words = _probe_terms(title)
+        if words:  # need at least one distinctive word
+            probes.append(_Probe(printed, section_num, words))
+
+    if len(probes) <= max_probes:
+        return tuple(probes)
+    step = len(probes) / max_probes
+    return tuple(probes[int(i * step)] for i in range(max_probes))
+
+
+def _endorsed_offsets(
+    probe: _Probe,
+    page_text: Callable[[int], str],
+    total_pages: int,
+    skip_pages: frozenset[int],
+    search_range: tuple[int, int],
+) -> tuple[tuple[int, float], ...]:
+    """Offsets this probe scores best at, as `(offset, score)` pairs.
+
+    Every candidate offset is scored and only the best-scoring ones are
+    endorsed. Returning the first match instead would systematically yield the
+    lowest offset in range, since running headers match on many pages.
+    """
+    scored: list[tuple[int, float]] = []
+    for offset in range(*search_range):
+        pdf_page = probe.printed_page + offset
+        if not (1 <= pdf_page <= total_pages) or pdf_page in skip_pages:
+            continue
+        score = _score_page(page_text(pdf_page), probe.section_num, probe.words)
+        if score > 0:
+            scored.append((offset, score))
+
+    if not scored:
+        return ()
+    best = max(score for _, score in scored)
+    return tuple((o, s) for o, s in scored if s >= best - 1e-9)
+
+
 def offset_from_keywords(
     titled_pages: Sequence[tuple[str, int]],
     page_text: Callable[[int], str],
@@ -319,44 +382,18 @@ def offset_from_keywords(
         `(offset, agreement, probes_used)`, or None if no probe matched.
         `agreement` is the fraction of probes endorsing the winning offset.
     """
-    probes = [
-        (title, printed, *_probe_terms(title))
-        for title, printed in sorted(titled_pages, key=lambda tp: tp[1])
-        if printed >= 1
-    ]
-    probes = [p for p in probes if p[3]]  # need at least one distinctive word
+    probes = _select_probes(titled_pages, max_probes)
     if not probes:
         return None
 
-    # Spread probes across the whole book rather than clustering at the front:
-    # a wrong offset that happens to fit chapter 1 rarely fits chapter 9 too.
-    if len(probes) > max_probes:
-        step = len(probes) / max_probes
-        probes = [probes[int(i * step)] for i in range(max_probes)]
-
     votes: Counter[int] = Counter()
     weights: defaultdict[int, float] = defaultdict(float)
-    lo, hi = search_range
-
-    for _title, printed, section_num, words in probes:
-        # Score every candidate offset, then let this probe endorse only its
-        # best-scoring ones. Taking the first match instead would systematically
-        # return the lowest offset in range.
-        scored: list[tuple[float, int]] = []
-        for offset in range(lo, hi):
-            pdf_page = printed + offset
-            if not (1 <= pdf_page <= total_pages) or pdf_page in skip_pages:
-                continue
-            if (score := _score_page(page_text(pdf_page), section_num, words)) > 0:
-                scored.append((score, offset))
-
-        if not scored:
-            continue
-        best = max(score for score, _ in scored)
-        for score, offset in scored:
-            if score >= best - 1e-9:
-                votes[offset] += 1
-                weights[offset] += score
+    for probe in probes:
+        for offset, score in _endorsed_offsets(
+            probe, page_text, total_pages, skip_pages, search_range
+        ):
+            votes[offset] += 1
+            weights[offset] += score
 
     if not votes:
         return None
@@ -387,56 +424,23 @@ def resolve_page_map(
     """
     votes = offset_from_folios(folios_by_page)
     arabic = votes.get(PageRef.PRINTED_ARABIC)
-
-    # The roman front matter is short, so its vote is always a small one; take
-    # it whenever it is self-consistent, independently of the arabic evidence.
-    roman_vote = votes.get(PageRef.PRINTED_ROMAN)
-    roman_offset = (
-        roman_vote.offset
-        if roman_vote is not None
-        and roman_vote.observations >= _MIN_ROMAN_OBSERVATIONS
-        and roman_vote.consensus >= _MIN_FOLIO_CONSENSUS
-        else None
-    )
-
-    def folio_map(vote: FolioVote) -> PageMap:
-        roman_detail = "" if roman_offset is None else f", roman {roman_offset:+d}"
-        return PageMap(
-            offset=vote.offset,
-            confidence=vote.consensus,
-            source=PageMapSource.FOLIO,
-            detail=(
-                f"{vote.observations} folios, "
-                f"{vote.consensus:.0%} agreement{roman_detail}"
-            ),
-            roman_offset=roman_offset,
-        )
+    roman_offset = _roman_offset(votes.get(PageRef.PRINTED_ROMAN))
 
     # Observed folios beat everything when they agree overwhelmingly: they are
     # what the reader actually sees on the page.
-    if (
-        arabic is not None
-        and arabic.observations >= _STRONG_FOLIO_OBSERVATIONS
-        and arabic.consensus >= _STRONG_FOLIO_CONSENSUS
+    if arabic is not None and arabic.is_strong(
+        _STRONG_FOLIO_OBSERVATIONS, _STRONG_FOLIO_CONSENSUS
     ):
-        return folio_map(arabic)
+        return _folio_map(arabic, roman_offset)
 
     if label_offset is not None:
         offset, detail = label_offset
-        return PageMap(
-            offset=offset,
-            confidence=0.9,
-            source=PageMapSource.PAGE_LABELS,
-            detail=detail,
-            roman_offset=roman_offset,
-        )
+        return PageMap(offset, 0.9, PageMapSource.PAGE_LABELS, detail, roman_offset)
 
-    if (
-        arabic is not None
-        and arabic.observations >= _MIN_FOLIO_OBSERVATIONS
-        and arabic.consensus >= _MIN_FOLIO_CONSENSUS
+    if arabic is not None and arabic.is_strong(
+        _MIN_FOLIO_OBSERVATIONS, _MIN_FOLIO_CONSENSUS
     ):
-        return folio_map(arabic)
+        return _folio_map(arabic, roman_offset)
 
     keyword = offset_from_keywords(
         titled_pages, page_text, total_pages, skip_pages=skip_pages
@@ -444,17 +448,37 @@ def resolve_page_map(
     if keyword is not None:
         offset, agreement, probes = keyword
         return PageMap(
-            offset=offset,
-            confidence=agreement,
-            source=PageMapSource.KEYWORD,
-            detail=f"{round(agreement * probes)}/{probes} probes agree",
-            roman_offset=roman_offset,
+            offset,
+            agreement,
+            PageMapSource.KEYWORD,
+            f"{round(agreement * probes)}/{probes} probes agree",
+            roman_offset,
         )
 
     return PageMap(
-        offset=0,
-        confidence=0.0,
-        source=PageMapSource.DEFAULT,
-        detail="no page-number evidence found",
+        0, 0.0, PageMapSource.DEFAULT, "no page-number evidence found", roman_offset
+    )
+
+
+def _roman_offset(vote: FolioVote | None) -> int | None:
+    """The front matter's offset, if its folios agree among themselves.
+
+    Front matter is short, so this vote is always a small one; it is judged on
+    its own rather than against the far larger arabic vote.
+    """
+    if vote is not None and vote.is_strong(
+        _MIN_ROMAN_OBSERVATIONS, _MIN_FOLIO_CONSENSUS
+    ):
+        return vote.offset
+    return None
+
+
+def _folio_map(vote: FolioVote, roman_offset: int | None) -> PageMap:
+    roman_detail = "" if roman_offset is None else f", roman {roman_offset:+d}"
+    return PageMap(
+        offset=vote.offset,
+        confidence=vote.consensus,
+        source=PageMapSource.FOLIO,
+        detail=f"{vote.observations} folios, {vote.consensus:.0%} agreement{roman_detail}",
         roman_offset=roman_offset,
     )

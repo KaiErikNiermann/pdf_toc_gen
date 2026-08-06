@@ -9,9 +9,8 @@ import typer
 
 from pdftoc.arxiv import get_arxiv_source
 from pdftoc.core import ExtractionMode, process_pdf
-from pdftoc.models import OcrBackend
 from pdftoc.deepdoc_headers import extract_section_headers_with_deepdoc
-from pdftoc.models import TocEntry, format_toc_plaintext
+from pdftoc.models import OcrBackend, TocEntry, format_toc_plaintext
 from pdftoc.toc_extraction import extract_toc_from_text
 
 app = typer.Typer(

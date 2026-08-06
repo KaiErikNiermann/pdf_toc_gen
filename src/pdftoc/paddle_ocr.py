@@ -136,7 +136,7 @@ def _lines_from_result(result: Any) -> list[tuple[float, float, str]]:
     if polys is None:
         polys = _get_field(result, "dt_polys")
     if texts is not None and polys is not None:
-        for text, poly in zip(texts, polys):
+        for text, poly in zip(texts, polys, strict=False):
             if not text:
                 continue
             ys = [float(p[1]) for p in poly]

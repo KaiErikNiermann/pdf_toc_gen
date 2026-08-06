@@ -14,6 +14,7 @@ from pdftoc.page_labels import (
     folios_from_text,
     resolve_page_map,
 )
+from pdftoc.pdf_text import page_text
 
 # Fraction of page height at the top and bottom treated as margin, where a
 # printed folio lives.
@@ -48,7 +49,7 @@ def verify_bookmarks(
         return True, []
 
     # Check 1: Bookmarks should have some structure (not all level 1 pointing to page 1)
-    all_same_page = len(set(b.page for b in bookmarks)) == 1
+    all_same_page = len({b.page for b in bookmarks}) == 1
     all_level_1 = all(b.level == 1 for b in bookmarks)
     if all_same_page and all_level_1 and len(bookmarks) <= 3:
         issues.append(
@@ -82,7 +83,7 @@ def verify_bookmarks(
             continue
 
         page: fitz.Page = doc[entry.page - 1]
-        text = page.get_text().lower()
+        text = page_text(page).lower()
 
         # Extract keywords from title (words with 4+ chars)
         keywords = [w.lower() for w in re.findall(r"[A-Za-z]{4,}", entry.title)]
@@ -212,37 +213,42 @@ def _margin_folios(page: fitz.Page) -> tuple[Folio, ...]:
     return tuple(sorted(folios, key=lambda f: (f.ref, f.number)))
 
 
+def _decimal_label_ranges(doc: fitz.Document) -> tuple[tuple[int, int], ...]:
+    """`/PageLabels` ranges numbered in plain decimals, as `(start, first_num)`.
+
+    `start` is a 0-indexed PDF page. Prefixed and roman ranges are ignored:
+    a TOC's arabic page numbers can only refer to a plain decimal range.
+    """
+    try:
+        labels = doc.get_page_labels()
+    except Exception:  # pragma: no cover - older PyMuPDF without the API
+        return ()
+
+    return tuple(
+        (int(rule["startpage"]), int(rule.get("firstpagenum", 1) or 1))
+        for rule in labels or ()
+        if str(rule.get("style", "")).upper() == "D" and not rule.get("prefix")
+    )
+
+
 def _page_label_offset(doc: fitz.Document) -> tuple[int, str] | None:
     """Offset implied by the PDF's own `/PageLabels`, if it declares one.
 
     Only decimal-numbered ranges matter: a TOC cites arabic page numbers, so
     the widest decimal range is the body of the book.
     """
-    try:
-        labels = doc.get_page_labels()
-    except Exception:  # pragma: no cover - older PyMuPDF without the API
-        return None
-    if not labels:
-        return None
-
-    decimal_ranges = [
-        rule
-        for rule in labels
-        if str(rule.get("style", "")).upper() == "D" and not rule.get("prefix")
-    ]
+    decimal_ranges = _decimal_label_ranges(doc)
     if not decimal_ranges:
         return None
 
-    # Widest decimal range wins; ranges are ordered by start page.
-    starts = sorted(int(rule["startpage"]) for rule in decimal_ranges)
-    widths = {
+    # Widest decimal range wins: that is the body of the book.
+    starts = sorted(start for start, _ in decimal_ranges)
+    width_from = {
         start: (starts[i + 1] if i + 1 < len(starts) else len(doc)) - start
         for i, start in enumerate(starts)
     }
-    best = max(decimal_ranges, key=lambda rule: widths[int(rule["startpage"])])
+    start_page, first_num = max(decimal_ranges, key=lambda r: width_from[r[0]])
 
-    start_page = int(best["startpage"])  # 0-indexed
-    first_num = int(best.get("firstpagenum", 1) or 1)
     offset = (start_page + 1) - first_num
     return offset, f"/PageLabels: PDF p.{start_page + 1} is printed p.{first_num}"
 
