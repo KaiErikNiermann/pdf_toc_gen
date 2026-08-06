@@ -3,9 +3,20 @@
 # Installs a Blackwell-capable torch (cu128) from PyTorch's CDN, then marker-pdf
 # (which pulls surya-ocr, transformers, etc.). Logs progress; safe to re-run
 # (pip skips already-satisfied packages and resumes partial downloads).
+#
+# Usage: scripts/install_marker.sh [logfile]
+# Set VENV to target a specific environment; otherwise Poetry's is used.
 set -uo pipefail
 
-VENV="$(poetry env info --path)"
+REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+
+VENV="${VENV:-$(cd "$REPO_ROOT" && poetry env info --path 2>/dev/null)}"
+if [ -z "$VENV" ] || [ ! -x "$VENV/bin/python" ]; then
+    echo "Could not locate the project virtualenv." >&2
+    echo "Run 'poetry install' first, or set VENV=/path/to/venv." >&2
+    exit 1
+fi
+
 PIP="$VENV/bin/python -m pip"
 LOG="${1:-$REPO_ROOT/scripts/.marker_install.log}"
 
