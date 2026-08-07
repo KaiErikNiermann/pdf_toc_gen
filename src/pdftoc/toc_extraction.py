@@ -142,6 +142,69 @@ def extract_toc_from_text(
     return toc_entries
 
 
+# Shared regex fragments. A TOC entry is always the same three parts -- a
+# label, a title, and a page -- but how they are separated varies per book, and
+# text extraction splits them across one, two or three lines depending on how
+# the PDF groups its spans. Naming the separators once keeps the pattern table
+# describing *shapes* rather than repeating punctuation.
+
+# Between the label and the title: a space, or the line break that appears when
+# extraction gives the number its own span ("1\nOdds and ends", "Chapter 1.\n").
+_LABEL_GAP = r"[ \t]*\n?[ \t]*"
+
+# Between the title and its page number: a run of leader dots, or -- for books
+# that print none -- the line break before the page. Requiring a three-character
+# leader run was the stricter of the two and silently lost every entry in books
+# that separate the two with nothing but a newline.
+#
+# The leader run is reached across arbitrary whitespace because extraction
+# sometimes puts the dots on a line of their own:
+#     1.6 / Orders and such / . . . . . . . / 7
+# Digits and letters are not whitespace, so this cannot wander into the next
+# entry -- the following entry's number stops it.
+_PAGE_GAP = r"(?:\s*(?:[.…·\-_][ \t]*){2,}\s*|[ \t.…·\-_]*\n[ \t]*)"
+
+# Optional section mark. Common in mathematics ("§1.1 Lebesgue measure") and
+# meaningless to the entry, so it is consumed rather than captured.
+_SECTION_MARK = r"[§¶]?[ \t]*"
+
+# The page's own heading is not an entry on it. Matched after the leading
+# number a pattern captured has been stripped, so "Part XII: CONTENTS" -- the
+# running head of a contents page, read as part XII -- is caught here.
+_BOILERPLATE_TITLES = frozenset(
+    {"contents", "table of contents", "index", "continued", "cont", "page"}
+)
+
+# Characters that essentially never occur in a section title but litter source
+# code. Deliberately excludes parentheses and the math operators that real
+# titles do use -- "L^p spaces (revisited)", "Sets & Functions", "σ-algebras".
+_CODE_CHARS = re.compile(r"[{}\[\]=;<>@#$]")
+
+# A division marker is a complete title on its own: "Part I" needs no name.
+_DIVISION_ONLY = re.compile(r"^\s*(?:chapter|part|appendix)\b", re.IGNORECASE)
+
+
+def _is_plausible_title(title: str) -> bool:
+    """Whether a captured title reads like a section name rather than debris."""
+    body = re.sub(r"^\s*(?:chapter|part|section)\s+", "", title, flags=re.IGNORECASE)
+    body = re.sub(r"^\s*[\dIVXivx]+(?:\.\d+)*\s*[.):]?\s*", "", body).strip()
+
+    if body.lower().strip(".:") in _BOILERPLATE_TITLES:
+        return False
+
+    if len(body) < 3:
+        # Nothing left after the numbering. That is a real entry only when the
+        # numbering was the whole point ("Part I", "Appendix B"); otherwise the
+        # pattern matched a page number and a fragment.
+        return bool(_DIVISION_ONLY.match(title))
+
+    letters = sum(c.isalpha() for c in body)
+    if letters < len(body) * 0.5:
+        return False
+
+    return len(_CODE_CHARS.findall(body)) == 0
+
+
 def _extract_dotted_leader_format(
     toc_text: str, total_pages: int, verbose: bool
 ) -> list[TocEntry]:
@@ -150,10 +213,15 @@ def _extract_dotted_leader_format(
     seen: set[tuple[str, int]] = set()
 
     patterns = [
-        # "Chapter 1: Title ... 15"
+        # "Chapter 1: Title ... 15", and the same entry with its page on the
+        # next line instead. A keyword-led line needs no leader dots to be
+        # unambiguous, and plenty of books print none -- one puts barely two
+        # whitespace characters between title and page, one short of the run
+        # the dotted form demands, which dropped every chapter it had.
         (
             re.compile(
-                r"^(Chapter|CHAPTER)\s+(\d+)[:\s]+(.+?)\s*[\.…·\-_\s]{3,}\s*(\d+)\s*$",
+                rf"^(Chapter|CHAPTER)\s+(\d+)[:.\s]{{1,2}}{_LABEL_GAP}"
+                rf"([^\n]+?){_PAGE_GAP}(\d{{1,4}})[ \t]*$",
                 re.MULTILINE,
             ),
             "chapter",
@@ -161,23 +229,26 @@ def _extract_dotted_leader_format(
         # "Part I: Title ... 5"
         (
             re.compile(
-                r"^(Part|PART)\s+([IVX\d]+)[:\s]+(.+?)\s*[\.…·\-_\s]{3,}\s*(\d+)\s*$",
+                rf"^(Part|PART)\s+([IVX\d]+)[:.\s]{{1,2}}{_LABEL_GAP}"
+                rf"([^\n]+?){_PAGE_GAP}(\d{{1,4}})[ \t]*$",
                 re.MULTILINE,
             ),
             "part",
         ),
-        # "1.1.1 Title ... 15"
+        # "1.1.1 Title ... 15", "§1.1.1 Title / 15"
         (
             re.compile(
-                r"^(\d+\.\d+\.\d+)\s+(.+?)\s*[\.…·\-_\s]{3,}\s*(\d+)\s*$",
+                rf"^{_SECTION_MARK}(\d+\.\d+\.\d+)\.?{_LABEL_GAP}"
+                rf"([^\n]+?){_PAGE_GAP}(\d{{1,4}})[ \t]*$",
                 re.MULTILINE,
             ),
             "subsub",
         ),
-        # "1.1 Title ... 15"
+        # "1.1 Title ... 15", "§1.1. Title / 15"
         (
             re.compile(
-                r"^(\d+\.\d+)\s+(.+?)\s*[\.…·\-_\s]{3,}\s*(\d+)\s*$",
+                rf"^{_SECTION_MARK}(\d+\.\d+)\.?{_LABEL_GAP}"
+                rf"([^\n]+?){_PAGE_GAP}(\d{{1,4}})[ \t]*$",
                 re.MULTILINE,
             ),
             "sub",
@@ -197,17 +268,26 @@ def _extract_dotted_leader_format(
         # through fine.
         #
         # Two layouts, because extraction groups the number with the title only
-        # when it is wide enough to sit in the same span:
-        #     1                        10 Charges and measures
-        #     Odds and ends            371
-        #     1
-        # Hence `[ \n]` between number and title. The remaining newlines are
-        # matched literally rather than as \s: this shape has no punctuation to
-        # anchor on, so pinning the exact line structure is what keeps it from
-        # running together unrelated lines.
+        # when it is wide enough to sit in the same span. They get separate
+        # patterns because they carry different risk.
+        #
+        # Number sharing the title's line -- "311 Boolean algebras / 13".
+        # Unambiguous: a page number is never followed by prose on its own line,
+        # so this tolerates the three-digit part numbering some series use.
         (
             re.compile(
-                r"^(\d{1,2})[ \n]([A-Z][^\n]{2,}?)[\.…·\-_ ]*\n(\d{1,4})$",
+                r"^(\d{1,3})[ \t]+([A-Z][^\n]{2,}?)[\.…·\-_ ]*\n(\d{1,4})[ \t]*$",
+                re.MULTILINE,
+            ),
+            "chapter_bare",
+        ),
+        # Number alone on its line -- "1 / Odds and ends / 1". A bare number is
+        # indistinguishable from the *previous* entry's page number, so this
+        # shape is held to one or two digits: a lone three-digit line in a
+        # contents is far more often a page than a chapter.
+        (
+            re.compile(
+                r"^(\d{1,2})\n([A-Z][^\n]{2,}?)[\.…·\-_ ]*\n(\d{1,4})[ \t]*$",
                 re.MULTILINE,
             ),
             "chapter_bare",
@@ -244,6 +324,8 @@ def _extract_dotted_leader_format(
 
             key = (title.lower(), page_num)
             if key in seen or page_num < 1 or page_num > total_pages + 50:
+                continue
+            if not _is_plausible_title(title):
                 continue
             seen.add(key)
             toc_entries.append(TocEntry(level=level, title=title, page=page_num))
@@ -299,8 +381,12 @@ def _extract_line_by_line_format(
 
         entry = _try_parse_toc_entry(lines, i, total_pages)
         if entry:
-            toc_entries.append(entry[0])
-            i = entry[1]  # Move to position after this entry
+            # Consume the lines either way: a rejected title still occupied
+            # them, and re-parsing from the middle of it only invents worse
+            # entries.
+            if _is_plausible_title(entry[0].title):
+                toc_entries.append(entry[0])
+            i = entry[1]
         else:
             i += 1
 
