@@ -8,6 +8,62 @@ from pdftoc.models import TocEntry
 from pdftoc.page_labels import PageRef, parse_page_label
 from pdftoc.pdf_text import page_text
 
+# Headings a contents page announces itself with, across the languages the
+# corpus actually contains.
+_TOC_INDICATORS = (
+    "contents",
+    "table of contents",
+    "inhaltsverzeichnis",
+    "índice",
+    "sommaire",
+    "目录",
+    "目次",
+)
+
+# How far into a book to look. Front matter is occasionally long.
+_TOC_SEARCH_PAGES = 30
+
+
+def find_toc_pages(
+    doc: fitz.Document,
+    page_texts: dict[int, str] | None = None,
+) -> list[tuple[int, str]]:
+    """Locate the contents pages as `(0-indexed page, text)`.
+
+    Shared so that anything reading a contents page -- the parser, and the
+    training-data builder behind the learned pass -- sees exactly the same
+    pages. A model trained on pages this did not select would be learning from
+    input it never receives at inference.
+    """
+    toc_pages: list[tuple[int, str]] = []
+
+    for i in range(min(_TOC_SEARCH_PAGES, len(doc))):
+        if page_texts is not None:
+            text = page_texts.get(i + 1, "")
+        else:
+            page: fitz.Page = doc[i]
+            text = page_text(page)
+
+        lowered = text.lower()
+        is_toc_page = any(marker in lowered for marker in _TOC_INDICATORS)
+
+        # A column of bare numbers is the page-reference column of a contents.
+        lines = text.strip().split("\n")
+        if sum(1 for line in lines if re.match(r"^\d+$", line.strip())) >= 5:
+            is_toc_page = True
+
+        # A continuation page rarely repeats the heading, so once the contents
+        # has started, dense section numbering is enough to stay in it.
+        if not is_toc_page and toc_pages:
+            is_toc_page = len(re.findall(r"(?:^|\s)\d+\.\d+(?:\.\d+)?\s", text)) >= 3
+
+        if is_toc_page:
+            toc_pages.append((i, text))
+        elif toc_pages:
+            break
+
+    return toc_pages
+
 
 def extract_toc_from_text(
     doc: fitz.Document,
@@ -30,48 +86,7 @@ def extract_toc_from_text(
     """
     toc_entries: list[TocEntry] = []
 
-    # Look for TOC pages in the first ~30 pages (some books have long front matter)
-    toc_pages: list[tuple[int, str]] = []
-    pages_to_search = min(30, len(doc))
-
-    for i in range(pages_to_search):
-        if page_texts is not None:
-            text = page_texts.get(i + 1, "")
-        else:
-            page: fitz.Page = doc[i]
-            text = page_text(page)
-
-        # Check if this looks like a TOC page
-        toc_indicators = [
-            "contents",
-            "table of contents",
-            "inhaltsverzeichnis",
-            "índice",
-            "sommaire",
-            "目录",
-            "目次",
-        ]
-        text_lower = text.lower()
-        is_toc_page = any(indicator in text_lower for indicator in toc_indicators)
-
-        # Also check if the page has many numbers (page refs) at line ends
-        lines = text.strip().split("\n")
-        number_lines = sum(1 for line in lines if re.match(r"^\d+$", line.strip()))
-        if number_lines >= 5:
-            is_toc_page = True
-
-        # If we already found a TOC page, check if this is a continuation
-        # (has many section-number patterns like "1.1", "2.3.4", "N. Title")
-        if not is_toc_page and toc_pages:
-            section_patterns = len(re.findall(r"(?:^|\s)\d+\.\d+(?:\.\d+)?\s", text))
-            if section_patterns >= 3:
-                is_toc_page = True
-
-        if is_toc_page:
-            toc_pages.append((i, text))
-        elif toc_pages:
-            # Stop once we hit a non-TOC page after finding TOC pages
-            break
+    toc_pages = find_toc_pages(doc, page_texts)
 
     if not toc_pages:
         if verbose:

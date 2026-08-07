@@ -101,7 +101,9 @@ def _run_backend(
         page_texts = extract_text(pdf, backend=backend, language="eng", verbose=False)
         elapsed = time.perf_counter() - t0
     except Exception as e:  # noqa: BLE001 - benchmark harness: report, don't crash
-        return BackendResult(name, False, 0.0, 0, 0, 0.0, error=f"{type(e).__name__}: {e}")
+        return BackendResult(
+            name, False, 0.0, 0, 0, 0.0, error=f"{type(e).__name__}: {e}"
+        )
 
     sims = [_similarity(truth.get(p, ""), txt) for p, txt in page_texts.items()]
     mean_sim = sum(sims) / len(sims) if sims else 0.0

@@ -36,6 +36,12 @@ deepdoc = [
     "transformers",
     "python-doctr",
 ]
+# Learned contents-line classifier. Optional so the core CLI stays light: the
+# regex pass runs unchanged when scikit-learn is absent, and the learned pass
+# simply does not contribute.
+ml = [
+    "scikit-learn>=1.5",
+]
 
 [project.scripts]
 pdftoc = "pdftoc.cli:run"
