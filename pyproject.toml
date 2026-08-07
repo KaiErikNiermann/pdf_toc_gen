@@ -31,7 +31,7 @@ paddle = [
     "paddlepaddle>=3.1,<3.2",
 ]
 deepdoc = [
-    "deepdoctection>=1.0.0",
+    "deepdoctection>=1.0.7",
     "timm",
     "transformers",
     "python-doctr",
@@ -44,8 +44,8 @@ pdftoc = "pdftoc.cli:run"
 packages = [{include = "pdftoc", from = "src"}]
 
 [tool.poetry.group.dev.dependencies]
-pytest = "^8.0.0"
-ruff = "^0.15.20"
+pytest = "^9.1.1"
+ruff = "^0.16.1"
 pyright = "^1.1.411"
 radon = "^6.0.1"
 xenon = "^0.9.3"
