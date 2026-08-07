@@ -4,9 +4,23 @@ CLI tool to add table of contents bookmarks to PDFs.
 
 ## Installation
 
+For development:
+
 ```bash
 poetry install
 ```
+
+To install `pdftoc` as a global command:
+
+```bash
+./install.sh
+```
+
+The installer prefers pipx, and falls back to a self-managed venv in
+`~/.local/share/pdftoc` symlinked into `~/.local/bin` — which works on
+PEP 668 "externally managed" distributions (Arch, Debian 12+, Fedora 38+)
+where `pip install --user` is refused. Set `PDFTOC_PYTHON` to pick the
+interpreter, or `PDFTOC_PREFIX` to relocate the fallback venv.
 
 ## Usage
 
@@ -37,6 +51,7 @@ through leaves the original file untouched.
 - `--lang`, `-l`: OCR language (default: `eng`)
 - `--ocr-backend`: `auto` | `ocrmypdf` | `paddle` | `marker` (see below)
 - `--verbose`, `-v`: Verbose output
+- `--version`, `-V`: Show version and build provenance, then exit
 
 ## OCR backends
 
