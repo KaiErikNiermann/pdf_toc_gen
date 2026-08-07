@@ -9,7 +9,14 @@ from pathlib import Path
 
 import fitz  # type: ignore
 
-from pdftoc.bookmarks import add_bookmarks, get_existing_bookmarks, verify_bookmarks
+from pdftoc.bookmarks import (
+    BookmarkDefect,
+    BookmarkIssue,
+    add_bookmarks,
+    get_existing_bookmarks,
+    repair_destinations,
+    verify_bookmarks,
+)
 from pdftoc.deepdoc_headers import (
     extract_section_headers_with_deepdoc,
     is_deepdoctection_available,
@@ -64,6 +71,61 @@ def atomic_output(target: Path) -> Iterator[Path]:
         staged.unlink(missing_ok=True)
 
 
+def _only_destinations_broken(issues: list[BookmarkIssue]) -> bool:
+    """Whether the sole complaint is that destinations cannot drive a jump."""
+    return bool(issues) and all(
+        issue.defect is BookmarkDefect.MALFORMED_DESTINATIONS for issue in issues
+    )
+
+
+def _reuse_existing_bookmarks(
+    source: Path,
+    output: Path,
+    reported_output: Path,
+    bookmarks: list[TocEntry],
+    fix_bookmarks: bool,
+    verbose: bool,
+) -> bool:
+    """Handle a document that already has bookmarks.
+
+    Returns True when the output has been written and there is nothing left to
+    do, False to fall through to extraction.
+    """
+    print(f"PDF has {len(bookmarks)} existing bookmark(s)")
+    doc: fitz.Document = fitz.open(source)
+    try:
+        is_valid, issues = verify_bookmarks(doc, bookmarks, verbose)
+
+        if is_valid:
+            print("Existing bookmarks appear correct, copying to output")
+            shutil.copy(source, output)
+            print(f"Done! Output saved to: {reported_output}")
+            return True
+
+        # A contents that names every page correctly but encodes destinations no
+        # viewer can follow is worth repairing rather than replacing: the
+        # document's own table is better than anything re-extraction can infer,
+        # and rewriting it costs no OCR and no LLM.
+        if fix_bookmarks and _only_destinations_broken(issues):
+            for issue in issues:
+                print(f"  - {issue}")
+            repaired = repair_destinations(doc)
+            doc.save(output)
+            print(f"Repaired {repaired} bookmark destination(s), kept titles and pages")
+            print(f"Done! Output saved to: {reported_output}")
+            return True
+
+        if fix_bookmarks:
+            print("Existing bookmarks appear incorrect, will regenerate")
+        else:
+            print(
+                "Warning: Existing bookmarks may be incorrect (use --fix to regenerate)"
+            )
+        return False
+    finally:
+        doc.close()
+
+
 def process_pdf(
     source: Path,
     output: Path,
@@ -104,23 +166,14 @@ def process_pdf(
     existing_bookmarks = get_existing_bookmarks(doc)
     doc.close()
 
-    if existing_bookmarks and not force_ocr:
-        print(f"PDF has {len(existing_bookmarks)} existing bookmark(s)")
-        doc = fitz.open(source)
-        is_valid, _issues = verify_bookmarks(doc, existing_bookmarks, verbose)
-        doc.close()
-
-        if is_valid:
-            print("Existing bookmarks appear correct, copying to output")
-            shutil.copy(source, output)
-            print(f"Done! Output saved to: {reported_output}")
-            return
-        elif fix_bookmarks:
-            print("Existing bookmarks appear incorrect, will regenerate")
-        else:
-            print(
-                "Warning: Existing bookmarks may be incorrect (use --fix to regenerate)"
-            )
+    if (
+        existing_bookmarks
+        and not force_ocr
+        and _reuse_existing_bookmarks(
+            source, output, reported_output, existing_bookmarks, fix_bookmarks, verbose
+        )
+    ):
+        return
 
     # Step 1: Check if OCR is needed
     needs_ocr = not pdf_has_text(source)

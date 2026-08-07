@@ -1,6 +1,9 @@
 """Bookmark management for PDFs."""
 
+import math
 import re
+from dataclasses import dataclass
+from enum import StrEnum
 from pathlib import Path
 
 import fitz  # type: ignore
@@ -21,6 +24,72 @@ from pdftoc.pdf_text import page_text
 _MARGIN_FRACTION = 0.12
 
 
+class BookmarkDefect(StrEnum):
+    """What is wrong with a document's existing bookmarks.
+
+    Typed because the repair path has to distinguish one defect from the rest:
+    malformed destinations are fixable in place, everything else means the table
+    itself is untrustworthy and has to be re-extracted.
+    """
+
+    NO_STRUCTURE = "no_structure"
+    NUMERIC_TITLES = "numeric_titles"
+    TOO_FEW = "too_few"
+    INVALID_PAGE = "invalid_page"
+    CONTENT_MISMATCH = "content_mismatch"
+    MALFORMED_DESTINATIONS = "malformed_destinations"
+
+
+@dataclass(frozen=True)
+class BookmarkIssue:
+    """One problem found in a document's bookmarks."""
+
+    defect: BookmarkDefect
+    detail: str
+
+    def __str__(self) -> str:
+        return self.detail
+
+
+def find_malformed_destinations(doc: fitz.Document) -> list[str]:
+    """Titles whose destination names the right page but cannot drive a jump.
+
+    `get_toc()` keeps only a page number, so a bookmark can be entirely correct
+    about *where* it points and still be dead in a viewer: navigating needs a
+    well-formed destination, and a truncated one is silently dropped.
+
+    The common breakage is `/Dest [<page> /XYZ 0]`, where the spec requires
+    `/XYZ left top zoom` -- three operands, not one. MuPDF resolves the missing
+    coordinate to NaN. Every well-formed destination type (`/Fit`, `/FitH`,
+    `/FitR`, and `/XYZ` with explicit nulls) resolves to finite values, so a
+    non-finite coordinate is an unambiguous signal rather than a heuristic.
+    """
+    broken: list[str] = []
+    for entry in doc.get_toc(simple=False):
+        title, dest = entry[1], entry[3]
+        if dest.get("kind") != fitz.LINK_GOTO:
+            continue
+        target = dest.get("to")
+        if target is None:
+            continue
+        if not (math.isfinite(target.x) and math.isfinite(target.y)):
+            broken.append(str(title))
+    return broken
+
+
+def repair_destinations(doc: fitz.Document) -> int:
+    """Rewrite the existing outline so every entry gets a usable destination.
+
+    The titles, levels and target pages are already right; only the destination
+    encoding is unusable. Re-setting the same table emits a complete
+    `/XYZ left top zoom` per entry, which keeps the document's own hand-built
+    contents instead of discarding it for a re-extracted approximation.
+    """
+    toc = doc.get_toc()
+    doc.set_toc(toc)
+    return len(toc)
+
+
 def get_existing_bookmarks(doc: fitz.Document) -> list[TocEntry]:
     """Get existing bookmarks from a PDF as TocEntry list."""
     # Bookmarks in a PDF already point at PDF pages, never printed ones.
@@ -35,71 +104,114 @@ def get_existing_bookmarks(doc: fitz.Document) -> list[TocEntry]:
     ]
 
 
+def _check_structure(bookmarks: list[TocEntry]) -> BookmarkIssue | None:
+    """A handful of level-1 entries on one page is a stub, not a contents."""
+    all_same_page = len({b.page for b in bookmarks}) == 1
+    all_level_1 = all(b.level == 1 for b in bookmarks)
+    if all_same_page and all_level_1 and len(bookmarks) <= 3:
+        return BookmarkIssue(
+            BookmarkDefect.NO_STRUCTURE,
+            f"Bookmarks lack structure: {len(bookmarks)} entries all pointing "
+            f"to page {bookmarks[0].page}",
+        )
+    return None
+
+
+def _check_titles(bookmarks: list[TocEntry]) -> BookmarkIssue | None:
+    """Numeric-only titles are page labels masquerading as a contents."""
+    numeric = sum(1 for b in bookmarks if b.title.strip().isdigit())
+    if numeric > len(bookmarks) * 0.8:
+        return BookmarkIssue(
+            BookmarkDefect.NUMERIC_TITLES,
+            f"Most bookmarks ({numeric}/{len(bookmarks)}) have numeric-only titles",
+        )
+    return None
+
+
+def _check_count(doc: fitz.Document, bookmarks: list[TocEntry]) -> BookmarkIssue | None:
+    if len(bookmarks) < 3 and len(doc) > 10:
+        return BookmarkIssue(
+            BookmarkDefect.TOO_FEW,
+            f"Too few bookmarks ({len(bookmarks)}) for document size "
+            f"({len(doc)} pages)",
+        )
+    return None
+
+
+def _title_matches_page(doc: fitz.Document, entry: TocEntry) -> bool:
+    """Whether any substantial word of the title appears on its target page."""
+    text = page_text(doc[entry.page - 1]).lower()
+    keywords = [w.lower() for w in re.findall(r"[A-Za-z]{4,}", entry.title)]
+    if not keywords:
+        return True
+    return any(kw in text for kw in keywords)
+
+
+def _check_content(
+    doc: fitz.Document, bookmarks: list[TocEntry]
+) -> list[BookmarkIssue]:
+    """Sample entries and confirm the target page looks like the right one."""
+    issues: list[BookmarkIssue] = []
+    sample_size = min(5, len(bookmarks))
+    # Prefer bookmarks not on page 1 for content verification.
+    sample = sorted(bookmarks, key=lambda b: (b.page == 1, b.page))[:sample_size]
+
+    mismatches = 0
+    for entry in sample:
+        if entry.page < 1 or entry.page > len(doc):
+            issues.append(
+                BookmarkIssue(
+                    BookmarkDefect.INVALID_PAGE,
+                    f"Bookmark '{entry.title}' points to invalid page {entry.page}",
+                )
+            )
+        elif not _title_matches_page(doc, entry):
+            mismatches += 1
+
+    if mismatches > sample_size // 2:
+        issues.append(
+            BookmarkIssue(
+                BookmarkDefect.CONTENT_MISMATCH,
+                f"{mismatches} of {sample_size} sampled bookmarks have content mismatch",
+            )
+        )
+    return issues
+
+
+def _check_destinations(doc: fitz.Document) -> BookmarkIssue | None:
+    """Right page, unusable jump -- invisible to every other check here."""
+    broken = find_malformed_destinations(doc)
+    if not broken:
+        return None
+    return BookmarkIssue(
+        BookmarkDefect.MALFORMED_DESTINATIONS,
+        f"{len(broken)} bookmark(s) have malformed destinations that no viewer "
+        f"can jump to (e.g. {broken[0]!r})",
+    )
+
+
 def verify_bookmarks(
     doc: fitz.Document, bookmarks: list[TocEntry], verbose: bool
-) -> tuple[bool, list[str]]:
+) -> tuple[bool, list[BookmarkIssue]]:
     """
     Verify if existing bookmarks are correct by checking structure and content.
 
     Returns (is_valid, issues) where issues is a list of problems found.
     """
-    issues: list[str] = []
-
     if not bookmarks:
         return True, []
 
-    # Check 1: Bookmarks should have some structure (not all level 1 pointing to page 1)
-    all_same_page = len({b.page for b in bookmarks}) == 1
-    all_level_1 = all(b.level == 1 for b in bookmarks)
-    if all_same_page and all_level_1 and len(bookmarks) <= 3:
-        issues.append(
-            f"Bookmarks lack structure: {len(bookmarks)} entries all pointing to page {bookmarks[0].page}"
+    issues = [
+        issue
+        for issue in (
+            _check_structure(bookmarks),
+            _check_titles(bookmarks),
+            _check_count(doc, bookmarks),
+            _check_destinations(doc),
         )
-
-    # Check 2: Bookmarks with numeric-only titles are useless page labels
-    numeric_titles = sum(1 for b in bookmarks if b.title.strip().isdigit())
-    if numeric_titles > len(bookmarks) * 0.8:
-        issues.append(
-            f"Most bookmarks ({numeric_titles}/{len(bookmarks)}) have numeric-only titles"
-        )
-
-    # Check 3: Should have reasonable number of entries for document size
-    if len(bookmarks) < 3 and len(doc) > 10:
-        issues.append(
-            f"Too few bookmarks ({len(bookmarks)}) for document size ({len(doc)} pages)"
-        )
-
-    # Check 4: Verify content on pages for a sample of bookmarks
-    sample_size = min(5, len(bookmarks))
-    # Prefer bookmarks not on page 1 for content verification
-    sample = sorted(bookmarks, key=lambda b: (b.page == 1, b.page))[:sample_size]
-
-    content_issues = 0
-    for entry in sample:
-        if entry.page < 1 or entry.page > len(doc):
-            issues.append(
-                f"Bookmark '{entry.title}' points to invalid page {entry.page}"
-            )
-            continue
-
-        page: fitz.Page = doc[entry.page - 1]
-        text = page_text(page).lower()
-
-        # Extract keywords from title (words with 4+ chars)
-        keywords = [w.lower() for w in re.findall(r"[A-Za-z]{4,}", entry.title)]
-
-        if not keywords:
-            continue
-
-        # Check if at least some keywords appear on the page
-        matches = sum(1 for kw in keywords if kw in text)
-        if matches < len(keywords) // 2 and matches < 1:
-            content_issues += 1
-
-    if content_issues > sample_size // 2:
-        issues.append(
-            f"{content_issues} of {sample_size} sampled bookmarks have content mismatch"
-        )
+        if issue is not None
+    ]
+    issues.extend(_check_content(doc, bookmarks))
 
     is_valid = len(issues) == 0
     if verbose:
