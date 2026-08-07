@@ -1,5 +1,6 @@
 """Tests for `--version` and the provenance it reports."""
 
+import re
 from datetime import UTC, datetime
 
 import pytest
@@ -11,6 +12,18 @@ from pdftoc.version import BuildInfo, collect_build_info, format_build_info
 runner = CliRunner()
 
 STAMP = datetime(2026, 8, 7, 18, 5, 12, tzinfo=UTC)
+
+_ANSI = re.compile(r"\x1b\[[0-9;]*m")
+
+
+def _plain(text: str) -> str:
+    """Strip ANSI styling from Typer/rich output.
+
+    rich colours each run separately, so a literal like "--from" arrives as
+    "ESC[..m-ESC[0mESC[..m-fromESC[0m". It disables colour when stdout is not a
+    tty, which makes naive substring assertions pass locally and fail in CI.
+    """
+    return _ANSI.sub("", text)
 
 
 def test_git_provenance_reports_the_revision() -> None:
@@ -71,12 +84,15 @@ def test_version_flag_prints_and_exits(flag: str) -> None:
     result = runner.invoke(app, [flag])
 
     assert result.exit_code == 0, result.output
-    assert "pdftoc" in result.output
+    assert "pdftoc" in _plain(result.output)
 
 
 def test_short_verbose_flag_is_not_version() -> None:
     """-v stays --verbose; only -V is version."""
     result = runner.invoke(app, ["-v"])
+    output = _plain(result.output)
 
     assert result.exit_code != 0, "should still demand --from"
-    assert "--from" in result.output
+    assert "--from" in output
+    # The point of the test: -v must not have become the version flag.
+    assert "python " not in output
