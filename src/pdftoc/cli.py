@@ -14,11 +14,19 @@ from pdftoc.core import ExtractionMode, atomic_output, process_pdf
 from pdftoc.deepdoc_headers import extract_section_headers_with_deepdoc
 from pdftoc.models import OcrBackend, TocEntry, format_toc_plaintext
 from pdftoc.toc_extraction import extract_toc_from_text
+from pdftoc.version import collect_build_info, format_build_info
 
 app = typer.Typer(
     name="pdftoc",
     help="Add table of contents bookmarks to PDFs. OCRs if needed.",
 )
+
+
+def _version_callback(requested: bool) -> None:
+    """Print provenance and exit before Typer enforces the required --from."""
+    if requested:
+        print(format_build_info(collect_build_info()))
+        raise typer.Exit()
 
 
 @app.command()
@@ -174,6 +182,18 @@ def main(
         typer.Option(
             "--searchable",
             help="Embed OCR text layer in output PDF (requires ocrmypdf + tesseract).",
+        ),
+    ] = False,
+    # Eager so `pdftoc --version` works on its own: --from is required, and a
+    # non-eager option would be rejected before the callback ever ran.
+    version: Annotated[
+        bool,
+        typer.Option(
+            "--version",
+            "-V",
+            callback=_version_callback,
+            is_eager=True,
+            help="Show version and build provenance, then exit.",
         ),
     ] = False,
 ) -> None:
