@@ -35,8 +35,13 @@ updates:
       - dependency-name: paddlepaddle
         versions: [">=3.2"]
 
+  # `/` only covers .github/workflows. The composite action lives outside that
+  # tree, so it needs its own entry or its pinned actions go unmonitored and
+  # silently rot (that is how setup-python and cache were left on Node 20).
   - package-ecosystem: github-actions
-    directory: /
+    directories:
+      - /
+      - /.github/actions/setup-python-poetry
     schedule:
       interval: weekly
       day: monday

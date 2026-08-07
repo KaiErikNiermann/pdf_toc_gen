@@ -14,7 +14,7 @@ runs:
   using: composite
   steps:
     - name: Set up Python ${{ inputs.python-version }}
-      uses: actions/setup-python@v5
+      uses: actions/setup-python@v7
       with:
         python-version: ${{ inputs.python-version }}
 
@@ -28,7 +28,7 @@ runs:
     # Keyed on the lock file, so the cache is invalidated exactly when the
     # dependency set changes.
     - name: Restore cached virtualenv
-      uses: actions/cache@v4
+      uses: actions/cache@v6
       with:
         path: .venv
         key: venv-${{ runner.os }}-py${{ inputs.python-version }}-${{ hashFiles('poetry.lock') }}
