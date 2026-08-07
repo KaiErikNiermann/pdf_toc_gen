@@ -14,10 +14,24 @@ poetry install
 pdftoc --from source.pdf --to output.pdf
 ```
 
+To bookmark a PDF where it sits, use `--in-place` instead of `--to`:
+
+```bash
+pdftoc --in-place --from book.pdf
+pdftoc -if book.pdf              # same thing, short form
+```
+
+The source is only overwritten once processing succeeds; a failure part-way
+through leaves the original file untouched.
+
+> Note the flag order in the short form. `-f` takes a value, so `-fi book.pdf`
+> reads as `--from=i` and fails — it has to be `-if book.pdf`.
+
 ### Options
 
 - `--from`, `-f`: Source PDF file (required)
-- `--to`, `-t`: Output PDF file (required)
+- `--to`, `-t`: Output PDF file (required unless `--in-place`)
+- `--in-place`, `-i`: Rewrite the source PDF instead of writing to `--to`
 - `--skip-ocr`: Skip OCR even if PDF appears to need it
 - `--force-ocr`: Force OCR even if PDF already has text
 - `--lang`, `-l`: OCR language (default: `eng`)

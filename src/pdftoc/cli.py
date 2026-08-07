@@ -1,6 +1,8 @@
 #!/usr/bin/env python3
 """CLI tool to add TOC bookmarks to PDFs."""
 
+import os
+from contextlib import AbstractContextManager, nullcontext
 from pathlib import Path
 from typing import Annotated
 
@@ -8,7 +10,7 @@ import fitz  # type: ignore
 import typer
 
 from pdftoc.arxiv import get_arxiv_source
-from pdftoc.core import ExtractionMode, process_pdf
+from pdftoc.core import ExtractionMode, atomic_output, process_pdf
 from pdftoc.deepdoc_headers import extract_section_headers_with_deepdoc
 from pdftoc.models import OcrBackend, TocEntry, format_toc_plaintext
 from pdftoc.toc_extraction import extract_toc_from_text
@@ -39,13 +41,21 @@ def main(
         typer.Option(
             "--to",
             "-t",
-            help="Output PDF file (required unless using --get-arxiv-source)",
+            help="Output PDF file (omit when using --in-place, --dump-toc or --get-arxiv-source)",
             file_okay=True,
             dir_okay=False,
             writable=True,
             resolve_path=True,
         ),
     ] = None,
+    in_place: Annotated[
+        bool,
+        typer.Option(
+            "--in-place",
+            "-i",
+            help="Rewrite the source PDF instead of writing to --to. Combine as -if FILE.",
+        ),
+    ] = False,
     skip_ocr: Annotated[
         bool,
         typer.Option(
@@ -188,10 +198,23 @@ def main(
         )
         return
 
-    # Regular TOC processing requires output path
-    if output is None:
-        print("Error: --to/-t output path is required for TOC processing")
+    # Regular TOC processing needs exactly one destination. In place, the write
+    # goes to a sibling staging file that is renamed over the source only once
+    # processing returns cleanly (see `atomic_output`).
+    destination: AbstractContextManager[Path]
+    if in_place:
+        if output is not None:
+            print("Error: --in-place/-i and --to/-t are mutually exclusive")
+            raise typer.Exit(1)
+        if not os.access(source, os.W_OK):
+            print(f"Error: --in-place needs write permission on {source}")
+            raise typer.Exit(1)
+        destination = atomic_output(source)
+    elif output is None:
+        print("Error: --to/-t output path is required (or use --in-place/-i)")
         raise typer.Exit(1)
+    else:
+        destination = nullcontext(output)
 
     # Convert backend string to enum
     backend_map = {
@@ -202,19 +225,22 @@ def main(
     }
     backend = backend_map.get(ocr_backend, OcrBackend.AUTO)
 
-    process_pdf(
-        source=source,
-        output=output,
-        skip_ocr=skip_ocr,
-        force_ocr=force_ocr,
-        language=language,
-        verbose=verbose,
-        optimize=optimize,
-        mode=extraction_mode,
-        fix_bookmarks=not no_fix,
-        ocr_backend=backend,
-        searchable=searchable,
-    )
+    # Both modes share one call so they cannot drift apart.
+    with destination as target:
+        process_pdf(
+            source=source,
+            output=target,
+            skip_ocr=skip_ocr,
+            force_ocr=force_ocr,
+            language=language,
+            verbose=verbose,
+            optimize=optimize,
+            mode=extraction_mode,
+            fix_bookmarks=not no_fix,
+            ocr_backend=backend,
+            searchable=searchable,
+            output_label=source if in_place else None,
+        )
 
 
 def _dump_toc_plaintext(

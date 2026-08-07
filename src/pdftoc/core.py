@@ -1,6 +1,10 @@
 """Core PDF processing logic."""
 
+import os
 import shutil
+import tempfile
+from collections.abc import Iterator
+from contextlib import contextmanager
 from pathlib import Path
 
 import fitz  # type: ignore
@@ -27,8 +31,37 @@ __all__ = [
     "get_existing_bookmarks",
     "verify_bookmarks",
     "process_pdf",
+    "atomic_output",
     "is_deepdoctection_available",
 ]
+
+
+@contextmanager
+def atomic_output(target: Path) -> Iterator[Path]:
+    """Yield a staging path to write, then move it onto `target` on clean exit.
+
+    Exists so a PDF can be rewritten in place. `process_pdf` reads its source
+    all the way through step 4, so it cannot be handed its own source as the
+    output -- it would be reading a file it is concurrently writing, and the
+    existing-bookmarks shortcut would raise `shutil.SameFileError` outright.
+
+    Staging alongside `target` keeps the final `os.replace` a same-filesystem
+    rename, which is atomic: a crash, a full disk or a Ctrl-C leaves the
+    original file intact rather than truncated. Readers see either the old file
+    or the new one, never a partial write.
+    """
+    fd, staged_name = tempfile.mkstemp(
+        dir=target.parent, prefix=f".{target.stem}.", suffix=".pdf"
+    )
+    os.close(fd)
+    staged = Path(staged_name)
+    try:
+        yield staged
+        os.replace(staged, target)
+    finally:
+        # After a successful replace the staged path is already gone; this only
+        # fires on the failure path, where the empty stub must not be left behind.
+        staged.unlink(missing_ok=True)
 
 
 def process_pdf(
@@ -43,6 +76,7 @@ def process_pdf(
     fix_bookmarks: bool = True,
     ocr_backend: OcrBackend = OcrBackend.AUTO,
     searchable: bool = False,
+    output_label: Path | None = None,
 ) -> None:
     """Main processing function.
 
@@ -58,7 +92,11 @@ def process_pdf(
         fix_bookmarks: If True, verify and fix incorrect existing bookmarks
         ocr_backend: OCR backend to use (auto, marker, ocrmypdf)
         searchable: If True, embed OCR text layer in output via ocrmypdf
+        output_label: Path to name in progress messages when `output` is a
+            staging file the user never sees (in-place runs). Defaults to
+            `output`.
     """
+    reported_output = output_label if output_label is not None else output
     print(f"Processing: {source}")
 
     # Step 0: Check existing bookmarks
@@ -75,7 +113,7 @@ def process_pdf(
         if is_valid:
             print("Existing bookmarks appear correct, copying to output")
             shutil.copy(source, output)
-            print(f"Done! Output saved to: {output}")
+            print(f"Done! Output saved to: {reported_output}")
             return
         elif fix_bookmarks:
             print("Existing bookmarks appear incorrect, will regenerate")
@@ -167,8 +205,6 @@ def process_pdf(
     # Step 5: Optionally embed OCR text layer via ocrmypdf
     if searchable and not pdf_has_text(output):
         print("Embedding searchable text layer (ocrmypdf)...")
-        import tempfile
-
         with tempfile.NamedTemporaryFile(suffix=".pdf", delete=False) as tmp:
             searchable_tmp = Path(tmp.name)
         try:
@@ -184,6 +220,6 @@ def process_pdf(
     if tmp_path and tmp_path.exists():
         tmp_path.unlink()
 
-    print(f"Done! Output saved to: {output}")
+    print(f"Done! Output saved to: {reported_output}")
     if toc_entries:
         print(f"Added {len(toc_entries)} bookmark(s)")
