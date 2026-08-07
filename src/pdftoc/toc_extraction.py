@@ -108,17 +108,25 @@ def extract_toc_from_text(
         if verbose:
             print(f"LLM extraction failed ({e}), falling back to regex...")
 
-    # Strategy 1: Try dotted leader patterns first
-    toc_entries = _extract_dotted_leader_format(
-        toc_text.replace("---PAGE BREAK---", ""), len(doc), verbose
-    )
+    # Both strategies read the same text looking for different shapes, and
+    # neither dominates: the dotted-leader patterns give cleaner titles, while
+    # the line-by-line parser recognises parts and unnumbered front matter.
+    #
+    # Running the second only when the first found *nothing* made them rivals
+    # instead of alternatives. A book whose section lines carry leader dots but
+    # whose part lines do not yields a partial dotted-leader parse, and a
+    # non-empty partial result silently suppressed the parser that would have
+    # read the whole table. Run both; keep whichever recovered more.
+    plain_text = toc_text.replace("---PAGE BREAK---", "")
+    dotted = _extract_dotted_leader_format(plain_text, len(doc), verbose)
+    line_by_line = _extract_line_by_line_format(plain_text, len(doc), verbose)
+    # Ties go to the dotted-leader parse, whose titles keep no leader dots.
+    toc_entries = max(dotted, line_by_line, key=len)
 
-    # Strategy 2: If no entries found, try line-by-line format
-    if not toc_entries:
-        if verbose:
-            print("No dotted leader format found, trying line-by-line format...")
-        toc_entries = _extract_line_by_line_format(
-            toc_text.replace("---PAGE BREAK---", ""), len(doc), verbose
+    if verbose:
+        print(
+            f"Dotted-leader parse: {len(dotted)} entries; "
+            f"line-by-line parse: {len(line_by_line)} entries"
         )
 
     # Sort by page number, then by level
@@ -182,6 +190,28 @@ def _extract_dotted_leader_format(
             ),
             "numbered",
         ),
+        # Chapter line carrying no keyword, no dot after the number and no
+        # leader dots. Every other pattern here relies on leader dots to find
+        # the page, and a chapter line often has none -- which silently dropped
+        # every chapter of a book whose sections (which do have leaders) came
+        # through fine.
+        #
+        # Two layouts, because extraction groups the number with the title only
+        # when it is wide enough to sit in the same span:
+        #     1                        10 Charges and measures
+        #     Odds and ends            371
+        #     1
+        # Hence `[ \n]` between number and title. The remaining newlines are
+        # matched literally rather than as \s: this shape has no punctuation to
+        # anchor on, so pinning the exact line structure is what keeps it from
+        # running together unrelated lines.
+        (
+            re.compile(
+                r"^(\d{1,2})[ \n]([A-Z][^\n]{2,}?)[\.…·\-_ ]*\n(\d{1,4})$",
+                re.MULTILINE,
+            ),
+            "chapter_bare",
+        ),
     ]
 
     for pattern, ptype in patterns:
@@ -198,6 +228,10 @@ def _extract_dotted_leader_format(
                 num, title, page_str = match
                 title = f"{num} {title.strip()}"
                 level = 3
+            elif ptype == "chapter_bare":
+                num, title, page_str = match
+                title = f"{num} {title.strip()}"
+                level = 2
             else:
                 num, title, page_str = match
                 title = f"{num}. {title.strip()}"

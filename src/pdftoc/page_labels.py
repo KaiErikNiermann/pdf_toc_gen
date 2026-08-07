@@ -23,6 +23,7 @@ Three sources of evidence, strongest first:
 from __future__ import annotations
 
 import re
+from bisect import bisect_left
 from collections import Counter, defaultdict
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass
@@ -99,6 +100,14 @@ class PageMap:
     Books number their front matter and their body separately, so one offset
     is not enough: `offset` maps the arabic body, `roman_offset` maps the roman
     front matter. Both are 1-indexed, `pdf_page = printed_page + offset`.
+
+    A single offset also assumes the two numberings stay in lockstep for the
+    whole body, which they do not when a PDF omits pages the printed book had
+    (dropped blanks, missing plates). The offset then drifts -- one real book
+    walks from +20 at chapter 1 to +13 by the index -- and any constant is
+    wrong almost everywhere. `folio_anchors` records printed pages actually
+    observed on specific PDF pages, which pins the mapping locally and lets the
+    offset serve only where nothing was observed.
     """
 
     offset: int
@@ -106,6 +115,33 @@ class PageMap:
     source: PageMapSource
     detail: str = ""
     roman_offset: int | None = None
+    # Sorted, strictly increasing in both coordinates: (printed arabic, PDF page).
+    folio_anchors: tuple[tuple[int, int], ...] = ()
+
+    def _from_anchors(self, page: int) -> int | None:
+        """Locate `page` against the observed folios, or None if unanchored.
+
+        An exact observation wins outright. Otherwise the surrounding anchors
+        bracket the answer: pages between two anchors are shifted by the nearer
+        one's offset, which tracks drift instead of averaging it away.
+        """
+        if not self.folio_anchors:
+            return None
+
+        index = bisect_left(self.folio_anchors, (page, 0))
+        if index < len(self.folio_anchors) and self.folio_anchors[index][0] == page:
+            return self.folio_anchors[index][1]
+
+        before = self.folio_anchors[index - 1] if index else None
+        after = self.folio_anchors[index] if index < len(self.folio_anchors) else None
+        nearest = min(
+            (a for a in (before, after) if a is not None),
+            key=lambda a: abs(a[0] - page),
+            default=None,
+        )
+        if nearest is None:
+            return None
+        return page + (nearest[1] - nearest[0])
 
     def to_pdf_page(
         self,
@@ -129,7 +165,9 @@ class PageMap:
                 pdf_page = min(pdf_page, self.offset)
             return max(1, min(total_pages, pdf_page))
 
-        return max(1, min(total_pages, page + self.offset))
+        anchored = self._from_anchors(page)
+        pdf_page = anchored if anchored is not None else page + self.offset
+        return max(1, min(total_pages, pdf_page))
 
 
 # A folio is a short bare integer on its own line. Cap the width so that stray
@@ -404,6 +442,72 @@ def offset_from_keywords(
     return offset, votes[offset] / len(probes), len(probes)
 
 
+def _unambiguous_folios(
+    folios_by_page: Mapping[int, Iterable[Folio]],
+) -> list[tuple[int, int]]:
+    """(printed arabic, PDF page) pairs where exactly one page claims the folio.
+
+    A printed number claimed by several pages is running-header or index noise,
+    not a folio, so it anchors nothing.
+    """
+    pages_by_folio: dict[int, set[int]] = {}
+    for pdf_page, folios in folios_by_page.items():
+        for folio in folios:
+            if folio.ref == PageRef.PRINTED_ARABIC:
+                pages_by_folio.setdefault(folio.number, set()).add(pdf_page)
+    return sorted(
+        (folio, next(iter(pages)))
+        for folio, pages in pages_by_folio.items()
+        if len(pages) == 1
+    )
+
+
+def _longest_consistent_run(
+    pairs: list[tuple[int, int]],
+) -> tuple[tuple[int, int], ...]:
+    """Keep the largest subset where PDF pages rise with printed pages.
+
+    Both numberings only ever advance, so any pair breaking that order is a
+    misread. Discarding the *fewest* pairs that restores monotonicity keeps the
+    genuine folios and drops outliers -- a stray "1" printed in the back matter
+    would otherwise anchor page 1 to the far end of the book.
+
+    Longest strictly increasing subsequence over the PDF coordinate, with the
+    predecessor chain kept so the winning run can be rebuilt.
+    """
+    if not pairs:
+        return ()
+
+    tail_index: list[int] = []  # position in `pairs` ending each run length
+    previous: list[int] = [-1] * len(pairs)
+    tails: list[int] = []  # smallest achievable end value per run length
+
+    for i, (_printed, pdf_page) in enumerate(pairs):
+        slot = bisect_left(tails, pdf_page)
+        if slot == len(tails):
+            tails.append(pdf_page)
+            tail_index.append(i)
+        else:
+            tails[slot] = pdf_page
+            tail_index[slot] = i
+        previous[i] = tail_index[slot - 1] if slot else -1
+
+    run: list[tuple[int, int]] = []
+    node = tail_index[-1]
+    while node != -1:
+        run.append(pairs[node])
+        node = previous[node]
+    return tuple(reversed(run))
+
+
+def _folio_anchors(
+    folios_by_page: Mapping[int, Iterable[Folio]],
+) -> tuple[tuple[int, int], ...]:
+    """Printed-to-PDF anchors that survive both consistency filters."""
+    anchors = _longest_consistent_run(_unambiguous_folios(folios_by_page))
+    return anchors if len(anchors) >= _MIN_FOLIO_OBSERVATIONS else ()
+
+
 def resolve_page_map(
     folios_by_page: Mapping[int, Iterable[Folio]],
     titled_pages: Sequence[tuple[str, int]],
@@ -426,21 +530,32 @@ def resolve_page_map(
     arabic = votes.get(PageRef.PRINTED_ARABIC)
     roman_offset = _roman_offset(votes.get(PageRef.PRINTED_ROMAN))
 
+    # Anchors are per-page evidence, so they stay useful even when the folios
+    # disagree about any single offset -- which is exactly what a drifting book
+    # looks like. Every branch below carries them.
+    anchors = _folio_anchors(folios_by_page)
+
     # Observed folios beat everything when they agree overwhelmingly: they are
     # what the reader actually sees on the page.
     if arabic is not None and arabic.is_strong(
         _STRONG_FOLIO_OBSERVATIONS, _STRONG_FOLIO_CONSENSUS
     ):
-        return _folio_map(arabic, roman_offset)
+        return _folio_map(arabic, roman_offset, anchors)
 
-    if label_offset is not None:
+    # /PageLabels is only metadata, and some producers write a decorative
+    # sequence that just counts the physical sheets. Anchors are what is
+    # actually printed on the page, so labels may not override them.
+    if label_offset is not None and not anchors:
         offset, detail = label_offset
         return PageMap(offset, 0.9, PageMapSource.PAGE_LABELS, detail, roman_offset)
 
     if arabic is not None and arabic.is_strong(
         _MIN_FOLIO_OBSERVATIONS, _MIN_FOLIO_CONSENSUS
     ):
-        return _folio_map(arabic, roman_offset)
+        return _folio_map(arabic, roman_offset, anchors)
+
+    if anchors:
+        return _anchor_map(anchors, roman_offset)
 
     keyword = offset_from_keywords(
         titled_pages, page_text, total_pages, skip_pages=skip_pages
@@ -473,12 +588,42 @@ def _roman_offset(vote: FolioVote | None) -> int | None:
     return None
 
 
-def _folio_map(vote: FolioVote, roman_offset: int | None) -> PageMap:
+def _folio_map(
+    vote: FolioVote,
+    roman_offset: int | None,
+    anchors: tuple[tuple[int, int], ...] = (),
+) -> PageMap:
     roman_detail = "" if roman_offset is None else f", roman {roman_offset:+d}"
+    anchor_detail = f", {len(anchors)} anchors" if anchors else ""
     return PageMap(
         offset=vote.offset,
         confidence=vote.consensus,
         source=PageMapSource.FOLIO,
-        detail=f"{vote.observations} folios, {vote.consensus:.0%} agreement{roman_detail}",
+        detail=f"{vote.observations} folios, {vote.consensus:.0%} "
+        f"agreement{roman_detail}{anchor_detail}",
         roman_offset=roman_offset,
+        folio_anchors=anchors,
+    )
+
+
+def _anchor_map(
+    anchors: tuple[tuple[int, int], ...], roman_offset: int | None
+) -> PageMap:
+    """A map carried entirely by per-page anchors.
+
+    Reached when no single offset commands a majority -- the signature of a
+    book whose offset drifts. The stored offset is only the fallback for
+    printed pages no anchor covers, so it is taken from the last anchor, where
+    the drift has gone furthest.
+    """
+    fallback = anchors[-1][1] - anchors[-1][0]
+    spread = anchors[0][1] - anchors[0][0]
+    return PageMap(
+        offset=fallback,
+        confidence=0.75,
+        source=PageMapSource.FOLIO,
+        detail=f"{len(anchors)} folio anchors, offset drifts "
+        f"{spread:+d} to {fallback:+d}",
+        roman_offset=roman_offset,
+        folio_anchors=anchors,
     )
