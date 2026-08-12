@@ -40,7 +40,7 @@ deepdoc = [
 # regex pass runs unchanged when scikit-learn is absent, and the learned pass
 # simply does not contribute.
 ml = [
-    "scikit-learn>=1.5",
+    "scikit-learn>=1.9.0",
 ]
 
 [project.scripts]
